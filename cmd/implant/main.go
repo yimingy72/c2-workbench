@@ -158,6 +158,7 @@ func session(c net.Conn) int {
 			case protocol.CmdShellOn:
 				closeShell()
 				cmd := shellCmd()
+				hideWindow(cmd)
 				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8", "CHCP=65001")
 				in, e1 := cmd.StdinPipe()
 				out, e2 := cmd.StdoutPipe()
@@ -236,6 +237,7 @@ func runCmd(c net.Conn, cmdline string) {
 	} else {
 		cmd = exec.Command("/bin/sh", "-c", cmdline)
 	}
+	hideWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if len(out) == 0 {
 		if err != nil {
