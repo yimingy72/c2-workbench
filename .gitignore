@@ -15,3 +15,10 @@ tools/upx
 dist/
 data/
 __pycache__/
+
+# webui/dist 是 go:embed 的产物，由 `make web` 从 web/ 生成。
+# index.html 一直在库里，但上面的 `dist/` 规则把 assets 一起忽略了，
+# 导致新克隆构建出的 server 只返回一个引用不存在资源的 index.html。
+# 显式把 assets 收进来，让 `go build ./cmd/server` 出来的二进制自带可用界面。
+!webui/dist/
+!webui/dist/assets/

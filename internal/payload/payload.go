@@ -473,6 +473,15 @@ func finishBinary(req Request, raw []byte, tech []string) (*Result, error) {
 		b = packed
 		tech = append(tech, "UPX LZMA")
 	}
+	// Patching (and packing) invalidates the ad-hoc signature Go emits for
+	// darwin binaries; arm64 macOS answers that with SIGKILL at exec. Repair it
+	// last so the fix covers every earlier stage.
+	if strings.HasPrefix(req.Target, "darwin-") {
+		if signed, how, ok := signDarwin(b, req.Filename); ok {
+			b = signed
+			tech = append(tech, how)
+		}
+	}
 	return &Result{Filename: req.Filename, Host: req.Host, Port: req.Port, Bytes: b, Techniques: tech}, nil
 }
 

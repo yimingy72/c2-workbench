@@ -9,10 +9,11 @@
 ```bash
 cp conf/setting.conf.example conf/setting.conf
 # 修改 web_password
-make web
 make server
 ./bin/server -config conf/setting.conf
 ```
+
+`webui/dist` 里已经带了构建好的控制台（`go:embed`），所以克隆后直接 `make server` 就有可用界面。只有改了 `web/` 才需要 `make web` 重新生成并同步 `webui/dist`。
 
 浏览器打开 `http://127.0.0.1:8082`。
 
@@ -24,6 +25,16 @@ make templates    # 五个目标平台模板
 ```
 
 仅在授权隔离环境使用。不要对未授权目标部署。
+
+### macOS 载荷签名
+
+`C2PATCH!` 补丁位和 UPX 都会让 Mach-O 的代码签名失效，而 macOS 11+ 的 arm64 内核会直接 SIGKILL 掉签名不匹配的可执行文件（没有 stderr 提示）。`internal/payload/macho.go` 在补丁/压缩之后重建 ad-hoc 签名：
+
+- 优先用内置签名器（纯 Go，任何构建主机都能用）：重写 `LC_CODE_SIGNATURE`、`__LINKEDIT` 的 filesize/vmsize，按 4096 字节页写 SHA-256 槽，`CodeDirectory v0x20400` + `flags 0x20002`
+- 遇到 fat / 32 位 / 没有签名命令的镜像，回退到 `codesign --force --sign -`
+- 两条路都失败时保留原字节，技术列表里不写重签，避免给出"看起来修好了"的产物
+
+注意：把签名整个删掉（`codesign --remove-signature`）同样会被内核拒绝，必须是有效签名。
 
 ## 浏览器信息
 
