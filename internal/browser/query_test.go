@@ -49,3 +49,33 @@ insert into cookies values('.example.com','sid',13300000000000000,'SECRET','BLOB
 		}
 	}
 }
+
+func TestFirefoxHistoryAndBookmarks(t *testing.T) {
+	bin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 not installed")
+	}
+	db := t.TempDir() + "/places.sqlite"
+	q := `create table moz_places(id integer primary key, url text, title text, visit_count int, last_visit_date int, hidden int);
+insert into moz_places values(1,'https://mozilla.org','Mozilla',2,13300000000000000,0),(2,'https://hidden/x','h',1,13300000000000001,1);
+create table moz_bookmarks(id integer primary key, type int, fk int, parent int, position int, title text);
+insert into moz_bookmarks values(1,2,NULL,0,0,'书签栏'),(2,1,1,1,0,'Mozilla 官网');`
+	if out, err := exec.Command(bin, db, q).CombinedOutput(); err != nil {
+		t.Fatalf("seed: %v %s", err, out)
+	}
+	data := mustRead(t, db)
+	_, rows, err := Run(data, "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0][0] != "https://mozilla.org" {
+		t.Fatalf("history rows %v", rows)
+	}
+	cols, rows, err := Run(data, "bookmarks")
+	if err != nil || len(cols) != 3 || len(rows) != 1 {
+		t.Fatalf("bookmarks cols=%v rows=%v err=%v", cols, rows, err)
+	}
+	if rows[0][0] != "书签栏" || rows[0][2] != "https://mozilla.org" {
+		t.Fatalf("bookmark row %v", rows[0])
+	}
+}

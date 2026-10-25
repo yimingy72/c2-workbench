@@ -114,6 +114,17 @@ function crumbs(p: string) {
   return out
 }
 
+function saveCsv(name: string, cols: string[], rows: string[][]) {
+  const esc = (v: string) => `"${(v ?? '').replace(/"/g, '""')}"`
+  const csv = [cols.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))].join('\r\n')
+  const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 const BROWSER_KINDS = new Set(['F', 'V', 'B', 'E'])
 
 function parseBrowser(output: string): BrowserRow[] {
@@ -336,7 +347,7 @@ export default function Host() {
   const [browserQ, setBrowserQ] = useState('')
   const [browserSnaps, setBrowserSnaps] = useState<BrowserSnap[]>([])
   const [browserSnapAt, setBrowserSnapAt] = useState(0)
-  const [dbKind, setDbKind] = useState<'' | 'history' | 'cookies'>('')
+  const [dbKind, setDbKind] = useState<'' | 'history' | 'cookies' | 'bookmarks'>('')
   const [dbCols, setDbCols] = useState<string[]>([])
   const [dbRows, setDbRows] = useState<string[][]>([])
   const [dbBusy, setDbBusy] = useState(false)
@@ -366,7 +377,7 @@ export default function Host() {
   }, [id, info?.hostname, message])
 
   const loadStore = useCallback(
-    async (path: string, kind: 'history' | 'cookies') => {
+    async (path: string, kind: 'history' | 'cookies' | 'bookmarks') => {
       if (!id || !path) return
       setDbBusy(true)
       try {
@@ -1058,11 +1069,11 @@ export default function Host() {
               dataSource={fileRows}
               locale={{ emptyText: online ? '点击扫描' : '主机离线' }}
               columns={[
-                { title: '浏览器', dataIndex: 'browser', width: 110 },
+                { title: '浏览器', dataIndex: 'browser', width: 110, sorter: (x: BrowserRow, y: BrowserRow) => x.browser.localeCompare(y.browser) },
                 { title: '配置文件', dataIndex: 'a', width: 130 },
                 { title: '项目', dataIndex: 'b', ellipsis: true },
-                { title: '大小', dataIndex: 'size', width: 100, render: (v: number) => (v ? fmtSize(v) : '—') },
-                { title: '最后修改', dataIndex: 'c', width: 170, render: (v: string) => fmtTime(Number(v)) },
+                { title: '大小', dataIndex: 'size', width: 100, sorter: (x: BrowserRow, y: BrowserRow) => x.size - y.size, render: (v: number) => (v ? fmtSize(v) : '—') },
+                { title: '最后修改', dataIndex: 'c', width: 170, sorter: (x: BrowserRow, y: BrowserRow) => Number(x.c) - Number(y.c), render: (v: string) => fmtTime(Number(v)) },
                 {
                   title: '操作',
                   width: 130,
@@ -1075,6 +1086,15 @@ export default function Host() {
                       <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'cookies')}>
                         Cookie 元数据
                       </Button>
+                    ) : r.b === 'places.sqlite' ? (
+                      <span>
+                        <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'history')}>
+                          历史
+                        </Button>
+                        <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'bookmarks')}>
+                          书签
+                        </Button>
+                      </span>
                     ) : null,
                 },
               ]}
@@ -1110,7 +1130,10 @@ export default function Host() {
             {dbKind ? (
               <>
                 <div className={styles.browserSection}>
-                  {dbKind === 'history' ? '浏览历史' : 'Cookie 元数据（主机 / 名称 / 过期时间，不含值）'}
+                  {dbKind === 'history' ? '浏览历史' : dbKind === 'bookmarks' ? '书签' : 'Cookie 元数据（主机 / 名称 / 过期时间，不含值）'}
+                  <Button type="link" size="small" onClick={() => saveCsv(`${dbKind}-${info?.hostname || 'host'}.csv`, dbCols, dbRows)}>
+                    导出 CSV
+                  </Button>
                   <Button
                     type="link"
                     size="small"

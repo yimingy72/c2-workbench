@@ -344,7 +344,7 @@ func (s *Server) browserQuery(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 422, "path required")
 		return
 	}
-	if _, ok := browser.Spec(body.Kind); !ok {
+	if !browser.Known(body.Kind) {
 		writeErr(w, 422, "unknown kind")
 		return
 	}
