@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -58,6 +59,17 @@ func (s *Store) Put(rec Record, data []byte) (Record, error) {
 	defer s.mu.Unlock()
 	if rec.ID == "" {
 		rec.ID = time.Now().Format("20060102150405")
+	}
+	// Two builds in the same second would share one .bin; keep IDs unique.
+	if _, err := os.Stat(filepath.Join(s.dir, rec.ID+".bin")); err == nil {
+		base := rec.ID
+		for i := 2; ; i++ {
+			cand := fmt.Sprintf("%s-%d", base, i)
+			if _, err := os.Stat(filepath.Join(s.dir, cand+".bin")); err != nil {
+				rec.ID = cand
+				break
+			}
+		}
 	}
 	if rec.At == 0 {
 		rec.At = time.Now().Unix()

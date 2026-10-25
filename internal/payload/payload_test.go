@@ -90,3 +90,21 @@ func TestBuildPE(t *testing.T) {
 		t.Fatalf("bad pe name=%s len=%d", res.Filename, len(res.Bytes))
 	}
 }
+
+func TestStoreUniqueID(t *testing.T) {
+	st := NewStore(t.TempDir())
+	a, err := st.Put(Record{Filename: "a.exe", Host: "127.0.0.1", Port: 1, Target: "windows-x64"}, []byte("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Put(Record{Filename: "b.exe", Host: "127.0.0.1", Port: 1, Target: "windows-x64"}, []byte("bb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == b.ID {
+		t.Fatalf("same-second payloads share id %q", a.ID)
+	}
+	if _, got, err := st.File(b.ID); err != nil || string(got) != "bb" {
+		t.Fatalf("file %q: %v %q", b.ID, err, got)
+	}
+}
