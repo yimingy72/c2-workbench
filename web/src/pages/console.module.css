@@ -955,3 +955,19 @@
     border-top: 1px solid var(--wb-border);
   }
 }
+
+.browserPane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+.browserHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

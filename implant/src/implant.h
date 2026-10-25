@@ -25,6 +25,7 @@
 #define CMD_FS_DEL 0x2A
 #define CMD_FS_MKDIR 0x2B
 #define CMD_FS_REN 0x2C
+#define CMD_BROWSER 0x2D
 #define RSP_DATA 0x81
 #define RSP_ERR 0x82
 #define RSP_END 0x83
@@ -45,5 +46,6 @@ void handle_fs_mkdir(SOCKET s, const char* path);
 void handle_fs_ren(SOCKET s, const char* spec);
 void handle_screen(SOCKET s, int max_w, int quality, int send_end);
 void handle_input(const unsigned char* p, int n);
+void handle_browser(SOCKET s);
 
 #endif

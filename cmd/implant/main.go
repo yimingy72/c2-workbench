@@ -123,6 +123,8 @@ func session(c net.Conn) int {
 				_ = writeFrame(c, protocol.RspData, []byte("pong"))
 			case protocol.CmdExec:
 				runCmd(c, string(fr.Payload))
+			case protocol.CmdBrowser:
+				handleBrowser(c)
 			case protocol.CmdFsLs:
 				handleLS(c, string(fr.Payload))
 			case protocol.CmdFsGet:

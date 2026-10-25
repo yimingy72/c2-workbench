@@ -72,6 +72,9 @@ func mockImplant(t *testing.T, addr string, ready chan struct{}) {
 		case protocol.CmdFsLs:
 			send(protocol.RspData, []byte("D\tC:\\\nF\treadme.txt\t12\n"))
 			send(protocol.RspEnd, nil)
+		case protocol.CmdBrowser:
+			send(protocol.RspData, []byte("Chrome\tDefault\tHistory\t1024\t1700000000\nChrome\t-\t141.0.7390.55\t0\t0\n"))
+			send(protocol.RspEnd, nil)
 		case protocol.CmdFsGet:
 			off, n, _ := protocol.ParseGetArg(string(f.Payload))
 			data := []byte("hello-file")
@@ -213,6 +216,35 @@ func TestHostOpsWithMockImplant(t *testing.T) {
 		t.Fatalf("ls %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+
+	resp = do("POST", "/api/sessions/"+sid+"/browser", map[string]string{})
+	if resp.StatusCode != 200 {
+		t.Fatalf("browser %d", resp.StatusCode)
+	}
+	var btid struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&btid)
+	resp.Body.Close()
+	gotBrowser := false
+	for i := 0; i < 20; i++ {
+		resp = do("GET", "/api/sessions/"+sid+"/tasks/"+btid.TaskID, nil)
+		var st map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&st)
+		resp.Body.Close()
+		if st["done"] == true {
+			out, _ := st["output"].(string)
+			if !bytes.Contains([]byte(out), []byte("Chrome\tDefault\tHistory")) {
+				t.Fatalf("browser output %q", out)
+			}
+			gotBrowser = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !gotBrowser {
+		t.Fatalf("browser task did not finish")
+	}
 
 	resp = do("POST", "/api/sessions/"+sid+"/fs/get", map[string]string{"path": "C:\\readme.txt"})
 	if resp.StatusCode != 200 {

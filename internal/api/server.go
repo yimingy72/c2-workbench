@@ -66,6 +66,7 @@ func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Han
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.auth(s.deleteSession))
 	mux.HandleFunc("POST /api/sessions/{id}/exec", s.auth(s.exec))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/ls", s.auth(s.fsLs))
+	mux.HandleFunc("POST /api/sessions/{id}/browser", s.auth(s.browser))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/get", s.auth(s.fsGet))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/put", s.auth(s.fsPut))
 	mux.HandleFunc("GET /api/sessions/{id}/xfers", s.auth(s.xferList))
@@ -316,6 +317,10 @@ func (s *Server) enqueueKind(w http.ResponseWriter, id string, kind session.Task
 		return
 	}
 	writeJSON(w, 200, map[string]string{"task_id": tid})
+}
+
+func (s *Server) browser(w http.ResponseWriter, r *http.Request) {
+	s.enqueueKind(w, r.PathValue("id"), session.TaskBrowser, "")
 }
 
 func (s *Server) fsLs(w http.ResponseWriter, r *http.Request) {
@@ -709,7 +714,7 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		"error":      t.Err,
 		"size":       len(t.Output),
 	}
-	if t.Kind == session.TaskExec || t.Kind == session.TaskFsLs {
+	if t.Kind == session.TaskExec || t.Kind == session.TaskFsLs || t.Kind == session.TaskBrowser {
 		dto["output"] = string(t.Output)
 	}
 	writeJSON(w, 200, dto)

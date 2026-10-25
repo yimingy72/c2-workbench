@@ -32,6 +32,7 @@ const (
 	TaskFsDel   TaskKind = "fs.del"
 	TaskFsMkdir TaskKind = "fs.mkdir"
 	TaskFsRen   TaskKind = "fs.ren"
+	TaskBrowser TaskKind = "browser"
 )
 
 const (
@@ -267,6 +268,8 @@ func cmdType(kind TaskKind) protocol.Type {
 		return protocol.CmdFsMkdir
 	case TaskFsRen:
 		return protocol.CmdFsRen
+	case TaskBrowser:
+		return protocol.CmdBrowser
 	default:
 		return protocol.CmdExec
 	}

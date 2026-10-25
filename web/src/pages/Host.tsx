@@ -6,6 +6,7 @@ import {
   CaretRightOutlined,
   CloseOutlined,
   CodeOutlined,
+  CompassOutlined,
   DesktopOutlined,
   DownloadOutlined,
   FileOutlined,
@@ -26,8 +27,9 @@ import type { SessionRow } from './Sessions'
 import TerminalPanel from './TerminalPanel'
 import styles from './console.module.css'
 
-type Mod = 'cmd' | 'files' | 'desk'
+type Mod = 'cmd' | 'files' | 'desk' | 'browser'
 type FsItem = { key: string; kind: 'dir' | 'file'; name: string; size: number; mtime?: number }
+type BrowserRow = { key: string; browser: string; profile: string; item: string; size: number; mtime: number }
 type Shot = { id: string; url: string; w: number; h: number; at: number }
 type StashItem = { id: string; name: string; remote: string; size: number; at: number }
 type XferJob = {
@@ -165,6 +167,7 @@ const MODS: { key: Mod; label: string; icon: ReactNode }[] = [
   { key: 'files', label: '文件管理', icon: <FolderOutlined /> },
   { key: 'cmd', label: '命令控制', icon: <CodeOutlined /> },
   { key: 'desk', label: '远程桌面', icon: <DesktopOutlined /> },
+  { key: 'browser', label: '浏览器信息', icon: <CompassOutlined /> },
 ]
 
 export default function Host() {
@@ -175,7 +178,7 @@ export default function Host() {
   const [sp, setSp] = useSearchParams()
   const [info, setInfo] = useState<SessionRow | null>(null)
   const rawMod = sp.get('mod')
-  const mod: Mod = rawMod === 'screen' ? 'desk' : (['cmd', 'files', 'desk'] as Mod[]).includes(rawMod as Mod) ? (rawMod as Mod) : 'files'
+  const mod: Mod = rawMod === 'screen' ? 'desk' : (['cmd', 'files', 'desk', 'browser'] as Mod[]).includes(rawMod as Mod) ? (rawMod as Mod) : 'files'
   const setMod = (m: Mod) => {
     const next = new URLSearchParams(sp)
     next.set('mod', m)
@@ -310,6 +313,32 @@ export default function Host() {
       /* ignore */
     }
   }
+
+  const [browserRows, setBrowserRows] = useState<BrowserRow[]>([])
+  const [browserBusy, setBrowserBusy] = useState(false)
+
+  const scanBrowser = useCallback(async () => {
+    if (!id) return
+    setBrowserBusy(true)
+    try {
+      const { task_id } = (await api(`/api/sessions/${id}/browser`, { method: 'POST', body: '{}' })) as { task_id: string }
+      await waitTask(id, task_id)
+      const st = (await api(`/api/sessions/${id}/tasks/${task_id}`)) as { output?: string }
+      const rows = (st.output || '')
+        .split('\n')
+        .filter(Boolean)
+        .map((line, i) => {
+          const p = line.split('\t')
+          return { key: `${i}`, browser: p[0] || '', profile: p[1] || '', item: p[2] || '', size: Number(p[3] || 0), mtime: Number(p[4] || 0) }
+        })
+      setBrowserRows(rows)
+      if (!rows.length) message.info('没找到浏览器配置目录')
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setBrowserBusy(false)
+    }
+  }, [id, message])
 
   const loadShots = useCallback(async () => {
     if (!id) return
@@ -934,6 +963,30 @@ export default function Host() {
             })}
           </div>
             </div>
+          </div>
+        </div>
+        <div className={styles.fill} hidden={mod !== 'browser'}>
+          <div className={styles.browserPane}>
+            <div className={styles.browserHead}>
+              <Button size="small" icon={<ReloadOutlined />} loading={browserBusy} disabled={!online} onClick={() => void scanBrowser()}>
+                扫描浏览器
+              </Button>
+              <span className={styles.mono}>{browserRows.length ? `${browserRows.length} 条记录` : '读取浏览器、配置文件与数据文件元信息，不解析凭据'}</span>
+            </div>
+            <Table
+              size="small"
+              rowKey="key"
+              pagination={false}
+              dataSource={browserRows}
+              locale={{ emptyText: online ? '点击扫描' : '主机离线' }}
+              columns={[
+                { title: '浏览器', dataIndex: 'browser', width: 110 },
+                { title: '配置文件', dataIndex: 'profile', width: 130 },
+                { title: '项目', dataIndex: 'item', ellipsis: true },
+                { title: '大小', dataIndex: 'size', width: 100, render: (v: number) => (v ? fmtSize(v) : '—') },
+                { title: '最后修改', dataIndex: 'mtime', width: 170, render: (v: number) => (v ? fmtTime(v) : '—') },
+              ]}
+            />
           </div>
         </div>
         <div className={styles.fill} hidden={mod !== 'desk'}>

