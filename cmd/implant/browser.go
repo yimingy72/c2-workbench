@@ -67,8 +67,8 @@ func browserRoots() []browserRoot {
 	}
 }
 
-func bLine(c net.Conn, kind, browser, a, b, cc string, size int64) {
-	line := strings.Join([]string{kind, browser, a, b, cc, strconv.FormatInt(size, 10)}, "\t") + "\n"
+func bLine(c net.Conn, kind, browser, a, b, cc string, size int64, path string) {
+	line := strings.Join([]string{kind, browser, a, b, cc, strconv.FormatInt(size, 10), path}, "\t") + "\n"
 	_ = writeFrame(c, protocol.RspData, []byte(line))
 }
 
@@ -95,7 +95,7 @@ func handleBrowser(c net.Conn) {
 				if err != nil || info.IsDir() {
 					continue
 				}
-				bLine(c, "F", br.name, sanitize(e.Name()), name, strconv.FormatInt(info.ModTime().Unix(), 10), info.Size())
+				bLine(c, "F", br.name, sanitize(e.Name()), name, strconv.FormatInt(info.ModTime().Unix(), 10), info.Size(), filepath.Join(profile, name))
 			}
 			if br.firefox {
 				continue
@@ -106,7 +106,7 @@ func handleBrowser(c net.Conn) {
 		if !br.firefox {
 			if v, err := os.ReadFile(filepath.Join(br.path, "Last Version")); err == nil {
 				if s := strings.TrimSpace(string(v)); s != "" {
-					bLine(c, "V", br.name, "-", s, "0", 0)
+					bLine(c, "V", br.name, "-", s, "0", 0, "")
 				}
 			}
 		}
@@ -134,7 +134,7 @@ func bookmarks(c net.Conn, browser, profileName, profilePath string) {
 	var walk func(bmNode)
 	walk = func(n bmNode) {
 		if n.URL != "" {
-			bLine(c, "B", browser, profileName, n.Name, n.URL, 0)
+			bLine(c, "B", browser, profileName, n.Name, n.URL, 0, "")
 		}
 		for _, ch := range n.Children {
 			walk(ch)
@@ -179,7 +179,7 @@ func extensions(c net.Conn, browser, profileName, profilePath string) {
 			if man.Version == "" {
 				man.Version = ver.Name()
 			}
-			bLine(c, "E", browser, profileName, sanitize(man.Name), sanitize(man.Version), 0)
+			bLine(c, "E", browser, profileName, sanitize(man.Name), sanitize(man.Version), 0, "")
 		}
 	}
 }

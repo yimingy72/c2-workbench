@@ -16,10 +16,16 @@ func Handler() http.Handler {
 		return http.NotFoundHandler()
 	}
 	file := http.FileServer(http.FS(sub))
+	// index.html is not hashed, so a stale copy would pair an old bundle with a
+	// new protocol. Hashed assets under /assets stay cacheable.
+	noStore := func(w http.ResponseWriter, h http.Handler, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		h.ServeHTTP(w, r)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
-		if p == "" {
-			file.ServeHTTP(w, r)
+		if p == "" || p == "index.html" {
+			noStore(w, file, r)
 			return
 		}
 		if _, err := fs.Stat(sub, p); err == nil {
@@ -28,6 +34,6 @@ func Handler() http.Handler {
 		}
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/"
-		file.ServeHTTP(w, r2)
+		noStore(w, file, r2)
 	})
 }

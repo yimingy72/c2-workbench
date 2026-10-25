@@ -37,6 +37,8 @@ const (
 
 const (
 	maxTaskBytes = 16 << 20
+	// browsing stores (History) routinely exceed the task cap
+	maxGetBytes = 128 << 20
 	putChunk     = 48 * 1024
 	maxPut       = 8 << 20
 	maxPutChunk  = 1 << 20
@@ -574,8 +576,12 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 			})
 		case TaskShell:
 			h.emitLocked(Event{Kind: EventShellData, SessionID: sessionID, TaskID: t.ID, Data: decodeOEM(f.Payload)})
-		case TaskScreen, TaskFsGet:
+		case TaskScreen:
 			if len(t.Output)+len(f.Payload) <= maxTaskBytes {
+				t.Output = append(t.Output, f.Payload...)
+			}
+		case TaskFsGet:
+			if len(t.Output) < maxGetBytes {
 				t.Output = append(t.Output, f.Payload...)
 			}
 		case TaskFsLs:
