@@ -24,6 +24,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	signal.Ignore(syscall.SIGHUP)
+
 	hub := session.NewHub(nil)
 	go func() {
 		t := time.NewTicker(5 * time.Second)
@@ -33,12 +35,19 @@ func main() {
 		}
 	}()
 	lm := listener.NewManager(hub)
+	lm.SetPersist("data/listeners.json")
+	lm.Restore()
 	h := api.New(cfg, hub, lm, webui.Handler())
-	srv := &http.Server{Addr: cfg.WebAddr(), Handler: h}
+	srv := &http.Server{
+		Addr:              cfg.WebAddr(),
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		log.Printf("console http://%s  title=%s", cfg.WebAddr(), cfg.WebTitle)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
+			log.Printf("listen: %v", err)
+			os.Exit(1)
 		}
 	}()
 	ch := make(chan os.Signal, 1)

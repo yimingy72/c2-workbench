@@ -7,5 +7,11 @@ implant/implant.exe
 *.exe
 .DS_Store
 *.log
+logs/
 tmp/
+tools/zig/
+tools/garble
+tools/upx
+dist/
+data/
 __pycache__/

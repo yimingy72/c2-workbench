@@ -1,0 +1,156 @@
+.item {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--wb-border);
+  border-left: 3px solid transparent;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--wb-canvas);
+}
+
+.item[aria-current='true'] {
+  border-left-color: var(--wb-accent);
+  background: var(--wb-selected);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--wb-accent);
+  outline-offset: -2px;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.id {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.meta {
+  margin-top: 4px;
+  color: var(--wb-text-secondary);
+  font-size: 12px;
+}
+
+.addr {
+  margin-top: 2px;
+  color: var(--wb-text-secondary);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.empty {
+  padding: 24px 16px;
+  color: var(--wb-text-secondary);
+  font-size: 13px;
+}
+
+.detail {
+  padding: 16px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.evidence {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--wb-evidence-bg);
+  color: var(--wb-evidence);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.exec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.scope {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  font-size: 13px;
+}
+
+.scope dt {
+  margin: 0;
+  color: var(--wb-text-secondary);
+  font-size: 12px;
+}
+
+.scope dd {
+  margin: 2px 0 0;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.form {
+  padding: 16px;
+  max-width: 420px;
+}
+
+.note {
+  padding: 0 16px 16px;
+  color: var(--wb-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.article {
+  height: 100%;
+  overflow: auto;
+  padding: 20px 24px 32px;
+  max-width: 720px;
+}
+
+.article h2 {
+  margin: 0 0 12px;
+  font-size: 19px;
+}
+
+.article p {
+  margin: 0 0 12px;
+  color: var(--wb-text);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.article pre {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--wb-evidence-bg);
+  color: var(--wb-evidence);
+  border-radius: 5px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.code {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+}

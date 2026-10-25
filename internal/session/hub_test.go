@@ -91,3 +91,26 @@ func TestEnqueueMissing(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+func TestEnqueueFsAndScreenTypes(t *testing.T) {
+	var types []protocol.Type
+	h := NewHub(nil)
+	s := h.Attach("L1", "1.2.3.4:9", protocol.Register{}, func(typ protocol.Type, p []byte) error {
+		types = append(types, typ)
+		return nil
+	})
+	if _, err := h.Enqueue(s.ID, TaskFsLs, "C:\\"); err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 1 || types[0] != protocol.CmdFsLs {
+		t.Fatalf("types %v", types)
+	}
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspData, Payload: []byte("D\tWindows\n")})
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspEnd})
+	if _, err := h.Enqueue(s.ID, TaskScreen, ""); err != nil {
+		t.Fatal(err)
+	}
+	if types[1] != protocol.CmdScreen {
+		t.Fatalf("screen %v", types)
+	}
+}

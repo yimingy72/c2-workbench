@@ -7,9 +7,9 @@ import (
 )
 
 const (
-	Magic0 byte = 0xA1
-	Magic1 byte = 0xB7
-	MaxPayload = 8192
+	Magic0     byte = 0xA1
+	Magic1     byte = 0xB7
+	MaxPayload      = 2097152
 )
 
 type Type uint16
@@ -20,7 +20,22 @@ const (
 	CmdQuit      Type = 0x03
 	CmdRegister  Type = 0x10
 	CmdHeartbeat Type = 0x11
+	CmdFsLs      Type = 0x20
+	CmdFsGet     Type = 0x21
+	CmdScreen    Type = 0x22
+	CmdDeskOn    Type = 0x23
+	CmdDeskOff   Type = 0x24
+	CmdInput     Type = 0x25
+	CmdShellOn   Type = 0x26
+	CmdShellIn   Type = 0x27
+	CmdShellOff  Type = 0x28
+	CmdFsPut     Type = 0x29
+	CmdFsDel     Type = 0x2A
+	CmdFsMkdir   Type = 0x2B
+	CmdFsRen     Type = 0x2C
 	RspData      Type = 0x81
+	RspShell     Type = 0x84
+	RspFrame     Type = 0x85
 	RspErr       Type = 0x82
 	RspEnd       Type = 0x83
 	RspOK        Type = 0x90
@@ -34,9 +49,9 @@ var XKey = [32]byte{
 }
 
 var (
-	ErrMagic   = errors.New("bad magic")
-	ErrTooBig  = errors.New("payload too large")
-	ErrShort   = errors.New("short buffer")
+	ErrMagic    = errors.New("bad magic")
+	ErrTooBig   = errors.New("payload too large")
+	ErrShort    = errors.New("short buffer")
 	ErrRegister = errors.New("bad register payload")
 )
 

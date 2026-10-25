@@ -1,9 +1,15 @@
 package listener
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"sort"
 	"sync"
 
 	"c2-platform/internal/protocol"
@@ -18,10 +24,12 @@ type Spec struct {
 }
 
 type Manager struct {
-	mu   sync.Mutex
-	n    uint64
-	hub  *session.Hub
-	list map[string]*running
+	mu      sync.Mutex
+	n       uint64
+	hub     *session.Hub
+	list    map[string]*running
+	persist string
+	loading bool
 }
 
 type running struct {
@@ -56,11 +64,12 @@ func (m *Manager) Start(spec Spec) (Spec, error) {
 	m.n++
 	spec.ID = fmt.Sprintf("l-%d", m.n)
 	if spec.Name == "" {
-		spec.Name = spec.ID
+		spec.Name = fmt.Sprintf("tcp-%d", spec.Port)
 	}
 	r := &running{spec: spec, ln: ln, stop: make(chan struct{})}
 	m.list[spec.ID] = r
 	go m.serve(r)
+	m.saveLocked()
 	return spec, nil
 }
 
@@ -72,6 +81,7 @@ func (m *Manager) Stop(id string) error {
 		return ErrNotFound
 	}
 	delete(m.list, id)
+	m.saveLocked()
 	m.mu.Unlock()
 	close(r.stop)
 	_ = r.ln.Close()
@@ -85,7 +95,64 @@ func (m *Manager) List() []Spec {
 	for _, r := range m.list {
 		out = append(out, r.spec)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out
+}
+
+func (m *Manager) SetPersist(path string) {
+	m.mu.Lock()
+	m.persist = path
+	m.mu.Unlock()
+}
+
+func (m *Manager) Restore() {
+	m.mu.Lock()
+	path := m.persist
+	m.mu.Unlock()
+	if path == "" {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return
+	}
+	var specs []Spec
+	if json.Unmarshal(b, &specs) != nil {
+		return
+	}
+	m.mu.Lock()
+	m.loading = true
+	m.mu.Unlock()
+	for _, s := range specs {
+		if _, err := m.Start(Spec{Name: s.Name, Bind: s.Bind, Port: s.Port}); err != nil {
+			log.Printf("restore listener %s:%d: %v", s.Bind, s.Port, err)
+		}
+	}
+	m.mu.Lock()
+	m.loading = false
+	m.saveLocked()
+	m.mu.Unlock()
+}
+
+func (m *Manager) saveLocked() {
+	if m.persist == "" || m.loading {
+		return
+	}
+	out := make([]Spec, 0, len(m.list))
+	for _, r := range m.list {
+		out = append(out, r.spec)
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(m.persist), 0o755)
+	_ = os.WriteFile(m.persist, b, 0o600)
 }
 
 func (m *Manager) serve(r *running) {
@@ -104,7 +171,12 @@ func (m *Manager) serve(r *running) {
 }
 
 func (m *Manager) handle(listenerID string, c net.Conn) {
-	defer c.Close()
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("session panic: %v\n%s", rec, debug.Stack())
+		}
+		c.Close()
+	}()
 	f, err := protocol.Decode(c)
 	if err != nil {
 		return
@@ -135,7 +207,7 @@ func (m *Manager) handle(listenerID string, c net.Conn) {
 			return
 		}
 		switch f.Type {
-		case protocol.CmdHeartbeat, protocol.CmdPing, protocol.RspData, protocol.RspErr, protocol.RspEnd:
+		case protocol.CmdHeartbeat, protocol.CmdPing, protocol.RspData, protocol.RspErr, protocol.RspEnd, protocol.RspShell, protocol.RspFrame:
 			m.hub.OnFrame(sid, f)
 		default:
 		}

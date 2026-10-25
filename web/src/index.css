@@ -1,4 +1,31 @@
-html, body, #root {
+html,
+body,
+#root {
   margin: 0;
+  height: 100%;
+  background: var(--wb-canvas, #f4f7f9);
+  color: var(--wb-text, #1d2129);
+  font-family: 'Inter Variable', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  font-optical-sizing: auto;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+#root {
   min-height: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-allow-motion]) *,
+  html:not([data-allow-motion]) *::before,
+  html:not([data-allow-motion]) *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
 }

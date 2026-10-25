@@ -10,6 +10,19 @@ export function clearToken() {
   localStorage.removeItem('token')
 }
 
+function filenameFromCD(cd: string | null, fallback: string) {
+  if (!cd) return fallback
+  const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd)
+  if (star) {
+    try {
+      return decodeURIComponent(star[1])
+    } catch {
+      return fallback
+    }
+  }
+  return fallback
+}
+
 async function parse(res: Response) {
   const text = await res.text()
   let data: unknown = null
@@ -35,7 +48,12 @@ export async function api(path: string, init: RequestInit = {}) {
   headers.set('Content-Type', 'application/json')
   const tok = getToken()
   if (tok) headers.set('Authorization', `Bearer ${tok}`)
-  const res = await fetch(path, { ...init, headers })
+  let res: Response
+  try {
+    res = await fetch(path, { ...init, headers })
+  } catch {
+    throw new Error('无法连接服务器')
+  }
   if (res.status === 401) {
     clearToken()
     if (!path.startsWith('/api/login')) {
@@ -43,4 +61,77 @@ export async function api(path: string, init: RequestInit = {}) {
     }
   }
   return parse(res)
+}
+
+export async function postDownload(path: string, body: unknown, fallbackName: string) {
+  const headers = new Headers()
+  headers.set('Content-Type', 'application/json')
+  const tok = getToken()
+  if (tok) headers.set('Authorization', `Bearer ${tok}`)
+  let res: Response
+  try {
+    res = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })
+  } catch {
+    throw new Error('无法连接服务器')
+  }
+  if (res.status === 401) {
+    clearToken()
+    window.location.assign('/login')
+    throw new Error('unauthorized')
+  }
+  if (!res.ok) {
+    await parse(res)
+    throw new Error('download failed')
+  }
+  const blob = await res.blob()
+  const name = filenameFromCD(res.headers.get('Content-Disposition'), fallbackName)
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+  return { name, size: blob.size }
+}
+
+export async function downloadGet(path: string, fallbackName: string) {
+  const headers = new Headers()
+  const tok = getToken()
+  if (tok) headers.set('Authorization', `Bearer ${tok}`)
+  let res: Response
+  try {
+    res = await fetch(path, { headers })
+  } catch {
+    throw new Error('无法连接服务器')
+  }
+  if (res.status === 401) {
+    clearToken()
+    window.location.assign('/login')
+    throw new Error('unauthorized')
+  }
+  if (!res.ok) {
+    await parse(res)
+    throw new Error('download failed')
+  }
+  const blob = await res.blob()
+  const name = filenameFromCD(res.headers.get('Content-Disposition'), fallbackName)
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+  return { name, size: blob.size }
 }

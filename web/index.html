@@ -1,10 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>web</title>
+    <title>管理平台 · 雾银</title>
+    <script>
+      (function () {
+        try {
+          var q = new URLSearchParams(location.search).get('theme')
+          var s = q || localStorage.getItem('wb-theme') || 'silver'
+          document.documentElement.dataset.theme = s
+          document.documentElement.style.colorScheme =
+            s === 'slate' || s === 'graphite' ? 'dark' : 'light'
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

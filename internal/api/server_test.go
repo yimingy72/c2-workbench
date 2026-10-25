@@ -101,3 +101,37 @@ func TestListenerCRUDAndExecMissing(t *testing.T) {
 		t.Fatalf("exec missing %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestPayloadMetaAndReject(t *testing.T) {
+	s := testServer()
+	body, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest("POST", "/api/login", bytes.NewReader(body)))
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &tok)
+	auth := func(req *http.Request) *http.Request {
+		req.Header.Set("Authorization", "Bearer "+tok.Token)
+		return req
+	}
+
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest("GET", "/api/payloads", nil))
+	if rr.Code != 401 {
+		t.Fatalf("unauth %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, auth(httptest.NewRequest("GET", "/api/payloads", nil)))
+	if rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte("xor-tcp")) {
+		t.Fatalf("meta %d %s", rr.Code, rr.Body.String())
+	}
+
+	bad, _ := json.Marshal(map[string]any{"host": "0.0.0.0", "port": 34567})
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, auth(httptest.NewRequest("POST", "/api/payloads", bytes.NewReader(bad))))
+	if rr.Code != 422 {
+		t.Fatalf("bad host %d %s", rr.Code, rr.Body.String())
+	}
+}

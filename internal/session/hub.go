@@ -1,7 +1,10 @@
 package session
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,17 +19,41 @@ const (
 	StatusDead   Status = "dead"
 )
 
+type TaskKind string
+
+const (
+	TaskExec    TaskKind = "exec"
+	TaskFsLs    TaskKind = "fs.ls"
+	TaskFsGet   TaskKind = "fs.get"
+	TaskScreen  TaskKind = "screen"
+	TaskDesktop TaskKind = "desktop"
+	TaskShell   TaskKind = "shell"
+	TaskFsPut   TaskKind = "fs.put"
+	TaskFsDel   TaskKind = "fs.del"
+	TaskFsMkdir TaskKind = "fs.mkdir"
+	TaskFsRen   TaskKind = "fs.ren"
+)
+
+const (
+	maxTaskBytes = 16 << 20
+	putChunk     = 48 * 1024
+	maxPut       = 8 << 20
+	maxPutChunk  = 1 << 20
+)
+
 type Session struct {
-	ID          string
-	ListenerID  string
-	RemoteAddr  string
-	Reg         protocol.Register
-	LastSeen    time.Time
-	Status      Status
-	Busy        bool
-	currentID   string
-	send        func(protocol.Type, []byte) error
-	queue       []queued}
+	ID         string
+	ListenerID string
+	RemoteAddr string
+	Reg        protocol.Register
+	Remark     string
+	LastSeen   time.Time
+	Status     Status
+	Busy       bool
+	currentID  string
+	send       func(protocol.Type, []byte) error
+	queue      []queued
+}
 
 type queued struct {
 	task *Task
@@ -35,10 +62,13 @@ type queued struct {
 type Task struct {
 	ID        string
 	SessionID string
+	Kind      TaskKind
 	Cmd       string
+	Payload   []byte
 	Output    []byte
 	Done      bool
 	Err       string
+	Off       int64
 }
 
 type EventKind string
@@ -52,6 +82,11 @@ const (
 	EventTaskError    EventKind = "task.error"
 	EventListenerUp   EventKind = "listener.up"
 	EventListenerDown EventKind = "listener.down"
+	EventScreenFrame  EventKind = "screen.frame"
+	EventFileList     EventKind = "file.list"
+	EventShellData    EventKind = "shell.data"
+	EventDeskFrame    EventKind = "desk.frame"
+	EventXfer         EventKind = "xfer.progress"
 )
 
 type Event struct {
@@ -59,6 +94,9 @@ type Event struct {
 	SessionID string    `json:"session_id,omitempty"`
 	TaskID    string    `json:"task_id,omitempty"`
 	Data      string    `json:"data,omitempty"`
+	Encoding  string    `json:"encoding,omitempty"`
+	Mime      string    `json:"mime,omitempty"`
+	Name      string    `json:"name,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	Listener  string    `json:"listener_id,omitempty"`
 }
@@ -127,9 +165,6 @@ func (h *Hub) Detach(id string) {
 	if !ok {
 		return
 	}
-	if s.Busy && len(s.queue) > 0 {
-		// drop queued
-	}
 	if s.Busy {
 		for _, t := range h.tasks {
 			if t.SessionID == id && !t.Done {
@@ -187,6 +222,10 @@ var (
 )
 
 func (h *Hub) EnqueueExec(sessionID, cmd string) (string, error) {
+	return h.Enqueue(sessionID, TaskExec, cmd)
+}
+
+func (h *Hub) Enqueue(sessionID string, kind TaskKind, arg string) (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, ok := h.sessions[sessionID]
@@ -199,12 +238,58 @@ func (h *Hub) EnqueueExec(sessionID, cmd string) (string, error) {
 	t := &Task{
 		ID:        h.nextID("t-"),
 		SessionID: sessionID,
-		Cmd:       cmd,
+		Kind:      kind,
+		Cmd:       arg,
 	}
 	h.tasks[t.ID] = t
 	s.queue = append(s.queue, queued{task: t})
 	h.kickLocked(s)
 	return t.ID, nil
+}
+
+func cmdType(kind TaskKind) protocol.Type {
+	switch kind {
+	case TaskFsLs:
+		return protocol.CmdFsLs
+	case TaskFsGet:
+		return protocol.CmdFsGet
+	case TaskScreen:
+		return protocol.CmdScreen
+	case TaskDesktop:
+		return protocol.CmdDeskOn
+	case TaskShell:
+		return protocol.CmdShellOn
+	case TaskFsPut:
+		return protocol.CmdFsPut
+	case TaskFsDel:
+		return protocol.CmdFsDel
+	case TaskFsMkdir:
+		return protocol.CmdFsMkdir
+	case TaskFsRen:
+		return protocol.CmdFsRen
+	default:
+		return protocol.CmdExec
+	}
+}
+
+func putSend(send func(protocol.Type, []byte) error, path string, data []byte, offset int64) {
+	hdr := make([]byte, 3+len(path)+8)
+	hdr[0] = 0
+	binary.LittleEndian.PutUint16(hdr[1:3], uint16(len(path)))
+	copy(hdr[3:], path)
+	binary.LittleEndian.PutUint64(hdr[3+len(path):], uint64(offset))
+	_ = send(protocol.CmdFsPut, hdr)
+	for i := 0; i < len(data); i += putChunk {
+		j := i + putChunk
+		if j > len(data) {
+			j = len(data)
+		}
+		chunk := make([]byte, 1+j-i)
+		chunk[0] = 1
+		copy(chunk[1:], data[i:j])
+		_ = send(protocol.CmdFsPut, chunk)
+	}
+	_ = send(protocol.CmdFsPut, []byte{2})
 }
 
 func (h *Hub) kickLocked(s *Session) {
@@ -215,7 +300,223 @@ func (h *Hub) kickLocked(s *Session) {
 	s.queue = s.queue[1:]
 	s.Busy = true
 	s.currentID = q.task.ID
-	_ = s.send(protocol.CmdExec, []byte(q.task.Cmd))
+	if q.task.Kind == TaskFsPut {
+		off := int64(0)
+		if len(q.task.Payload) >= 8 {
+			// offset stashed in first 8 bytes when using PutFileAt
+		}
+		_ = off
+		putSend(s.send, q.task.Cmd, q.task.Payload, q.task.Off)
+		return
+	}
+	body := q.task.Payload
+	if body == nil {
+		body = []byte(q.task.Cmd)
+	}
+	_ = s.send(cmdType(q.task.Kind), body)
+}
+
+func (h *Hub) SendInput(sessionID string, payload []byte) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.Status != StatusOnline || s.send == nil {
+		return ErrOffline
+	}
+	return s.send(protocol.CmdInput, payload)
+}
+
+func (h *Hub) StopDesktop(sessionID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.send == nil {
+		return ErrOffline
+	}
+	return s.send(protocol.CmdDeskOff, nil)
+}
+
+func (h *Hub) SendShell(sessionID string, payload []byte) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.Status != StatusOnline || s.send == nil {
+		return ErrOffline
+	}
+	return s.send(protocol.CmdShellIn, payload)
+}
+
+func (h *Hub) StopShell(sessionID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.send == nil {
+		return ErrOffline
+	}
+	return s.send(protocol.CmdShellOff, nil)
+}
+
+func (h *Hub) StartShell(sessionID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.Status != StatusOnline || s.send == nil {
+		return ErrOffline
+	}
+	return s.send(protocol.CmdShellOn, nil)
+}
+
+func (h *Hub) StartDesktop(sessionID string, width, quality int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.Status != StatusOnline || s.send == nil {
+		return ErrOffline
+	}
+	if width < 0 {
+		width = 1920
+	}
+	if width > 3840 {
+		width = 3840
+	}
+	if quality < 40 {
+		quality = 85
+	}
+	if quality > 95 {
+		quality = 95
+	}
+	var b [4]byte
+	binary.LittleEndian.PutUint16(b[0:2], uint16(width))
+	binary.LittleEndian.PutUint16(b[2:4], uint16(quality))
+	return s.send(protocol.CmdDeskOn, b[:])
+}
+
+func (h *Hub) PutFile(sessionID, path string, data []byte) (string, error) {
+	if path == "" {
+		return "", errors.New("path required")
+	}
+	if len(data) > maxPut {
+		return "", errors.New("file too large")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return "", ErrNoSession
+	}
+	if s.Status != StatusOnline {
+		return "", ErrOffline
+	}
+	t := &Task{ID: h.nextID("t-"), SessionID: sessionID, Kind: TaskFsPut, Cmd: path, Payload: data}
+	h.tasks[t.ID] = t
+	if s.Busy || s.send == nil {
+		s.queue = append(s.queue, queued{task: t})
+		return t.ID, nil
+	}
+	s.Busy = true
+	s.currentID = t.ID
+	putSend(s.send, path, data, 0)
+	return t.ID, nil
+}
+
+func (h *Hub) EnqueueGet(sessionID, path string, offset, maxlen int64) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return "", ErrNoSession
+	}
+	if s.Status != StatusOnline {
+		return "", ErrOffline
+	}
+	t := &Task{
+		ID:        h.nextID("t-"),
+		SessionID: sessionID,
+		Kind:      TaskFsGet,
+		Cmd:       path,
+		Payload:   protocol.EncodeGetArg(offset, maxlen, path),
+		Off:       offset,
+	}
+	h.tasks[t.ID] = t
+	s.queue = append(s.queue, queued{task: t})
+	h.kickLocked(s)
+	return t.ID, nil
+}
+
+func (h *Hub) PutFileAt(sessionID, path string, offset int64, data []byte) (string, error) {
+	if path == "" {
+		return "", errors.New("path required")
+	}
+	if len(data) > maxPutChunk {
+		return "", errors.New("chunk too large")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return "", ErrNoSession
+	}
+	if s.Status != StatusOnline {
+		return "", ErrOffline
+	}
+	t := &Task{ID: h.nextID("t-"), SessionID: sessionID, Kind: TaskFsPut, Cmd: path, Payload: data, Off: offset}
+	h.tasks[t.ID] = t
+	if s.Busy || s.send == nil {
+		s.queue = append(s.queue, queued{task: t})
+		return t.ID, nil
+	}
+	s.Busy = true
+	s.currentID = t.ID
+	putSend(s.send, path, data, offset)
+	return t.ID, nil
+}
+
+func (h *Hub) Emit(ev Event) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.emitLocked(ev)
+}
+
+func (h *Hub) SetRemark(sessionID, remark string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	s.Remark = remark
+	return nil
+}
+
+func (h *Hub) Quit(sessionID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		return ErrNoSession
+	}
+	if s.send == nil {
+		return ErrOffline
+	}
+	return s.send(protocol.CmdQuit, nil)
 }
 
 func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
@@ -232,13 +533,46 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 			s.Status = StatusOnline
 			h.emitLocked(Event{Kind: EventSessionUp, SessionID: sessionID})
 		}
+	case protocol.RspShell:
+		h.emitLocked(Event{Kind: EventShellData, SessionID: sessionID, Data: decodeOEM(f.Payload)})
+	case protocol.RspFrame:
+		b64 := base64.StdEncoding.EncodeToString(f.Payload)
+		t := h.inFlightLocked(s)
+		if t != nil && t.Kind == TaskScreen {
+			t.Output = append([]byte(nil), f.Payload...)
+			h.emitLocked(Event{Kind: EventScreenFrame, SessionID: sessionID, TaskID: t.ID, Data: b64, Encoding: "base64", Mime: "image/jpeg"})
+		} else {
+			h.emitLocked(Event{Kind: EventDeskFrame, SessionID: sessionID, Data: b64, Encoding: "base64", Mime: "image/jpeg"})
+		}
 	case protocol.RspData:
 		t := h.inFlightLocked(s)
 		if t == nil {
 			return
 		}
-		t.Output = append(t.Output, f.Payload...)
-		h.emitLocked(Event{Kind: EventTaskOutput, SessionID: sessionID, TaskID: t.ID, Data: string(f.Payload)})
+		switch t.Kind {
+		case TaskDesktop:
+			t.Output = append([]byte(nil), f.Payload...)
+			h.emitLocked(Event{
+				Kind:      EventScreenFrame,
+				SessionID: sessionID,
+				TaskID:    t.ID,
+				Data:      base64.StdEncoding.EncodeToString(f.Payload),
+				Encoding:  "base64",
+				Mime:      "image/jpeg",
+			})
+		case TaskShell:
+			h.emitLocked(Event{Kind: EventShellData, SessionID: sessionID, TaskID: t.ID, Data: decodeOEM(f.Payload)})
+		case TaskScreen, TaskFsGet:
+			if len(t.Output)+len(f.Payload) <= maxTaskBytes {
+				t.Output = append(t.Output, f.Payload...)
+			}
+		case TaskFsLs:
+			t.Output = append(t.Output, f.Payload...)
+			h.emitLocked(Event{Kind: EventFileList, SessionID: sessionID, TaskID: t.ID, Data: decodeOEM(f.Payload)})
+		default:
+			t.Output = append(t.Output, f.Payload...)
+			h.emitLocked(Event{Kind: EventTaskOutput, SessionID: sessionID, TaskID: t.ID, Data: decodeOEM(f.Payload)})
+		}
 	case protocol.RspErr:
 		t := h.inFlightLocked(s)
 		if t == nil {
@@ -258,7 +592,23 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 		t.Done = true
 		s.Busy = false
 		s.currentID = ""
-		h.emitLocked(Event{Kind: EventTaskEnd, SessionID: sessionID, TaskID: t.ID, Data: string(t.Output)})
+		ev := Event{Kind: EventTaskEnd, SessionID: sessionID, TaskID: t.ID}
+		switch t.Kind {
+		case TaskScreen:
+			ev.Kind = EventScreenFrame
+			ev.Data = base64.StdEncoding.EncodeToString(t.Output)
+			ev.Encoding = "base64"
+			ev.Mime = "image/jpeg"
+		case TaskFsLs:
+			ev.Kind = EventFileList
+			ev.Data = string(t.Output)
+		case TaskFsGet:
+			ev.Name = filepath.Base(t.Cmd)
+			ev.Data = t.ID
+		default:
+			ev.Data = string(t.Output)
+		}
+		h.emitLocked(ev)
 		h.kickLocked(s)
 	}
 }
@@ -308,12 +658,28 @@ func (h *Hub) List() []Session {
 	return out
 }
 
-func (h *Hub) Subscribe() <-chan Event {
+func (h *Hub) Subscribe() chan Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	ch := make(chan Event, 32)
+	ch := make(chan Event, 256)
 	h.subs = append(h.subs, ch)
 	return ch
+}
+
+func (h *Hub) Unsubscribe(ch chan Event) {
+	if ch == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, s := range h.subs {
+		if s != ch {
+			h.subs[n] = s
+			n++
+		}
+	}
+	h.subs = h.subs[:n]
 }
 
 func (h *Hub) emitLocked(e Event) {
@@ -323,4 +689,16 @@ func (h *Hub) emitLocked(e Event) {
 		default:
 		}
 	}
+}
+
+func EncodeInput(kind byte, x, y int32, code uint16, down bool) []byte {
+	b := make([]byte, 12)
+	b[0] = kind
+	binary.LittleEndian.PutUint32(b[1:5], uint32(x))
+	binary.LittleEndian.PutUint32(b[5:9], uint32(y))
+	binary.LittleEndian.PutUint16(b[9:11], code)
+	if down {
+		b[11] = 1
+	}
+	return b
 }
