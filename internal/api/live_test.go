@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,11 +26,22 @@ func peSubsystem(b []byte) uint16 {
 	return binary.LittleEndian.Uint16(b[pe+24+68:])
 }
 
+// TestLiveDaemonOpsAndPayload is an opt-in probe against a real running daemon.
+// It used to fire whenever anything listened on 8082, which made `go test ./...`
+// fail on any machine with an unrelated instance (or a different password).
+// Point C2_LIVE_URL at the daemon and it runs; leave it empty and it skips.
 func TestLiveDaemonOpsAndPayload(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("C2_LIVE_URL"), "/")
+	if base == "" {
+		t.Skip("set C2_LIVE_URL (e.g. http://127.0.0.1:8082) to run the live daemon probe")
+	}
+	user := envOr("C2_LIVE_USER", "admin")
+	pass := envOr("C2_LIVE_PASS", "changeme")
+
 	client := &http.Client{Timeout: 90 * time.Second}
-	res, err := client.Get("http://127.0.0.1:8082/")
+	res, err := client.Get(base + "/")
 	if err != nil {
-		t.Skip("daemon not running")
+		t.Skipf("daemon not reachable at %s: %v", base, err)
 	}
 	home, _ := io.ReadAll(res.Body)
 	res.Body.Close()
@@ -36,8 +49,8 @@ func TestLiveDaemonOpsAndPayload(t *testing.T) {
 		t.Fatalf("index %d", res.StatusCode)
 	}
 
-	login, _ := json.Marshal(map[string]string{"username": "admin", "password": "changeme"})
-	res, err = client.Post("http://127.0.0.1:8082/api/login", "application/json", bytes.NewReader(login))
+	login, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+	res, err = client.Post(base+"/api/login", "application/json", bytes.NewReader(login))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +68,7 @@ func TestLiveDaemonOpsAndPayload(t *testing.T) {
 			b, _ := json.Marshal(body)
 			r = bytes.NewReader(b)
 		}
-		req, _ := http.NewRequest(method, "http://127.0.0.1:8082"+path, r)
+		req, _ := http.NewRequest(method, base+path, r)
 		req.Header.Set("Authorization", "Bearer "+tok.Token)
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -134,7 +147,7 @@ func TestLiveDaemonOpsAndPayload(t *testing.T) {
 		t.Fatal("no live session")
 	}
 
-	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:8082/api/ws?token="+tok.Token, nil)
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+base[len("http"):]+"/api/ws?token="+tok.Token, nil)
 	if err != nil {
 		t.Fatalf("ws %v", err)
 	}
@@ -229,4 +242,11 @@ func TestLiveDaemonOpsAndPayload(t *testing.T) {
 			t.Fatalf("live missing %s in %v", k, got)
 		}
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
 }
