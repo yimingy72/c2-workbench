@@ -109,6 +109,15 @@ type Hub struct {
 	sessions map[string]*Session
 	tasks    map[string]*Task
 	subs     []chan Event
+	onDone   func(kind TaskKind, host string, rows []byte)
+}
+
+// SetOnDone registers a callback fired after a task completes. It runs on its
+// own goroutine so slow consumers never block the hub lock.
+func (h *Hub) SetOnDone(fn func(kind TaskKind, host string, rows []byte)) {
+	h.mu.Lock()
+	h.onDone = fn
+	h.mu.Unlock()
 }
 
 func NewHub(now func() time.Time) *Hub {
@@ -612,6 +621,10 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 			ev.Data = string(t.Output)
 		}
 		h.emitLocked(ev)
+		if t.Done && h.onDone != nil {
+			rows := append([]byte(nil), t.Output...)
+			go h.onDone(t.Kind, s.Reg.Hostname, rows)
+		}
 		h.kickLocked(s)
 	}
 }

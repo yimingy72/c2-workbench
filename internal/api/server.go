@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"c2-platform/internal/auth"
+	"c2-platform/internal/browser"
 	"c2-platform/internal/config"
 	"c2-platform/internal/listener"
 	"c2-platform/internal/payload"
@@ -39,6 +40,7 @@ type Server struct {
 	stash     *stash.Store
 	shots     *shots.Store
 	xf        *xfer.Manager
+	br        *browser.Store
 }
 
 func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Handler) http.Handler {
@@ -51,7 +53,13 @@ func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Han
 		store: payload.NewStore("data/payloads"),
 		stash: stash.New("data/stash"),
 		shots: shots.New("data/shots"),
+		br:    browser.New("data/browser"),
 	}
+	hub.SetOnDone(func(kind session.TaskKind, host string, rows []byte) {
+		if kind == session.TaskBrowser && len(rows) > 0 {
+			_, _ = s.br.Put(host, string(rows), time.Now().Unix())
+		}
+	})
 	s.xf = xfer.New(hub, s.stash, "data/xfer")
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.login)
@@ -67,6 +75,7 @@ func New(cfg *config.Config, hub *session.Hub, lm *listener.Manager, ui http.Han
 	mux.HandleFunc("POST /api/sessions/{id}/exec", s.auth(s.exec))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/ls", s.auth(s.fsLs))
 	mux.HandleFunc("POST /api/sessions/{id}/browser", s.auth(s.browser))
+	mux.HandleFunc("GET /api/browser/{host}", s.auth(s.browserHistory))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/get", s.auth(s.fsGet))
 	mux.HandleFunc("POST /api/sessions/{id}/fs/put", s.auth(s.fsPut))
 	mux.HandleFunc("GET /api/sessions/{id}/xfers", s.auth(s.xferList))
@@ -317,6 +326,14 @@ func (s *Server) enqueueKind(w http.ResponseWriter, id string, kind session.Task
 		return
 	}
 	writeJSON(w, 200, map[string]string{"task_id": tid})
+}
+
+func (s *Server) browserHistory(w http.ResponseWriter, r *http.Request) {
+	list := s.br.List(r.PathValue("host"))
+	if list == nil {
+		list = []browser.Snapshot{}
+	}
+	writeJSON(w, 200, list)
 }
 
 func (s *Server) browser(w http.ResponseWriter, r *http.Request) {

