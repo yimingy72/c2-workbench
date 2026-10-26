@@ -77,11 +77,52 @@ ss -lntp | grep 8082
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/
 ```
 
+## 2.5 工具链（可选，装了才能「现场编译」）
+
+内嵌模板能出包，但要走 `现场编译`（自定义 ldflags、`符号剥离`、`Garble 混淆`、`UPX`）需要 Go 工具链**和源码树**——`payload.buildGo` 会在 `WorkingDirectory` 向上找 `go.mod`，然后 `go build ./cmd/implant`。
+
+```bash
+# 1) Go（apt 的 1.18 太旧，go.mod 要求 1.27.1+）
+curl -fsSL -o /tmp/go.tgz https://golang.google.cn/dl/go1.27.3.linux-amd64.tar.gz
+sha256sum /tmp/go.tgz     # 与 https://go.dev/dl/?mode=json 里的 sha256 比对
+rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+ln -sf /usr/local/go/bin/go /usr/local/bin/go
+
+# 2) 模块代理（服务器直连 proxy.golang.org 不通）
+cat > /etc/profile.d/go.sh <<'EOF'
+export PATH=/usr/local/go/bin:$PATH
+export GOPROXY=https://goproxy.cn,direct
+export GOTOOLCHAIN=local
+EOF
+
+# 3) 源码树放到 WorkingDirectory，并把模块与构建缓存预热
+tar -xzf src.tar.gz -C /opt/c2-platform --strip-components=1
+cd /opt/c2-platform && go mod download
+GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -buildid=' -o /tmp/w ./cmd/implant
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -buildid=' -o /tmp/w.exe ./cmd/implant
+
+# 4) 可选：UPX 与 Garble
+apt-get install -y upx-ucl
+GOBIN=/usr/local/bin go install mvdan.cc/garble@latest
+```
+
+systemd 单元必须把工具链和代理传进去，否则服务进程 `exec.LookPath` 找不到：
+
+```ini
+Environment=HOME=/root
+Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=GOPROXY=https://goproxy.cn,direct
+Environment=GOTOOLCHAIN=local
+```
+
+实测（2 核 / 3.5G）：`linux-amd64` 现场编译 2s（缓存已热）；带 `upx` 4.1MB→3.0MB；带 `garble` 冷启 51s、热启 37s。载荷生成接口的服务端超时是 180s，Garble 首包在更慢的机器上可能触顶，先手工跑一次 `garble build` 把缓存打热即可。
+
 ## 3. 目录与日志
 
 | 路径 | 内容 |
 | --- | --- |
 | `/opt/c2-platform/bin/server` | 服务端二进制 |
+| `/opt/c2-platform/{cmd,internal,implant,go.mod,...}` | 源码树，供「现场编译」使用 |
 | `/opt/c2-platform/conf/setting.conf` | 账号 / JWT / 端口，`0600` |
 | `/opt/c2-platform/data/payloads` | 生成的载荷与历史 |
 | `/opt/c2-platform/data/stash`、`data/shots` | 文件暂存、屏幕截取 |
@@ -92,7 +133,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/
 
 ```bash
 systemctl stop c2-platform
-# 覆盖 bin/server（data/ 与 conf/ 不动）
+# 覆盖 bin/server；若也更新了源码，同步 cmd/ internal/ implant/ go.mod go.sum
 systemctl start c2-platform
 ```
 
