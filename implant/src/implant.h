@@ -26,6 +26,8 @@
 #define CMD_FS_MKDIR 0x2B
 #define CMD_FS_REN 0x2C
 #define CMD_BROWSER 0x2D
+#define CMD_CREDS 0x2E
+#define CMD_BROWSER_DEEP 0x2F
 #define RSP_DATA 0x81
 #define RSP_ERR 0x82
 #define RSP_END 0x83
