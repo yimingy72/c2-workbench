@@ -94,8 +94,12 @@ func session(c net.Conn) int {
 		shOut   io.ReadCloser
 		shCmd   *exec.Cmd
 		put     putState
+		shGen   int
+		shMu    sync.Mutex
 	)
 	closeShell := func() {
+		shMu.Lock()
+		shGen++ // orphan any pump goroutine still running
 		if shIn != nil {
 			_ = shIn.Close()
 			shIn = nil
@@ -108,10 +112,43 @@ func session(c net.Conn) int {
 			_ = shCmd.Process.Kill()
 			shCmd = nil
 		}
+		shMu.Unlock()
+	}
+
+	// pumpShell reads the child's stdout on its own goroutine.
+	//
+	// It used to be read inline in the command loop behind a 20 ms read
+	// deadline. When that deadline did not take effect (blocking pipe) the loop
+	// parked inside Read: heartbeats kept flowing so the console showed the host
+	// online, while every command frame queued up unread. Opening the terminal
+	// was enough to wedge the session - that is what users hit.
+	pumpShell := func(out io.ReadCloser, cmd *exec.Cmd, gen int) {
+		buf := make([]byte, 8192)
+		for {
+			n, err := out.Read(buf)
+			if n > 0 {
+				if writeFrame(c, protocol.RspShell, buf[:n]) != nil {
+					return
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		shMu.Lock()
+		current := gen == shGen
+		shMu.Unlock()
+		if !current {
+			return // a newer shell (or a stop) already took over
+		}
+		if cmd != nil {
+			_ = cmd.Wait()
+		}
+		closeShell()
+		_ = writeFrame(c, protocol.RspEnd, nil)
 	}
 	defer closeShell()
 
-	buf := make([]byte, 8192)
 	frames, readErr := readFrames(c)
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
@@ -198,7 +235,12 @@ func session(c net.Conn) int {
 					_ = writeFrame(c, protocol.RspErr, []byte("shell fail"))
 					break
 				}
+				shMu.Lock()
 				shIn, shOut, shCmd = in, out, cmd
+				shGen++
+				gen := shGen
+				shMu.Unlock()
+				go pumpShell(out, cmd, gen)
 			case protocol.CmdShellIn:
 				if shIn != nil && len(fr.Payload) > 0 {
 					_, _ = shIn.Write(fr.Payload)
@@ -212,22 +254,6 @@ func session(c net.Conn) int {
 		case <-tick.C:
 		}
 
-		if f, ok := shOut.(*os.File); ok {
-			_ = f.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-			n, rerr := f.Read(buf)
-			if n > 0 {
-				_ = writeFrame(c, protocol.RspShell, buf[:n])
-			}
-			if rerr != nil && rerr != io.EOF {
-				if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
-					// keep pumping
-				} else if shCmd != nil {
-					_ = shCmd.Wait()
-					closeShell()
-					_ = writeFrame(c, protocol.RspEnd, nil)
-				}
-			}
-		}
 		if deskOn && time.Since(lastCap) >= 450*time.Millisecond {
 			handleScreen(c, deskMax, false)
 			lastCap = time.Now()
