@@ -83,6 +83,19 @@ export default function TerminalPanel({
     doFit()
     const t0 = window.setTimeout(doFit, 50)
     const t1 = window.setTimeout(doFit, 200)
+    const onContextMenu = (ev: MouseEvent) => {
+      ev.preventDefault()
+      if (term.hasSelection()) {
+        void copySelection()
+        term.clearSelection()
+        return
+      }
+      void navigator.clipboard?.readText?.().then(sendText).catch(() => {
+        /* http page: use Ctrl+Shift+V, which goes through the paste event */
+      })
+    }
+    el.current.addEventListener('contextmenu', onContextMenu)
+
     const ro = new ResizeObserver(doFit)
     ro.observe(el.current)
     if (el.current.parentElement) ro.observe(el.current.parentElement)
@@ -90,6 +103,68 @@ export default function TerminalPanel({
     // No local echo: the shell echoes, and drawing every key twice is what made
     // the line look garbled. Arrow keys / control sequences are forwarded as-is
     // so line editing keeps working.
+    const isWin = (os || '').toLowerCase().startsWith('win')
+    const sendText = (text: string) => {
+      // pasted text may carry \n or \r\n; the shell wants the platform's form
+      const norm = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      queueRef.current += isWin ? norm.replace(/\n/g, '\r\n') : norm.replace(/\n/g, '\r')
+      void pump.current()
+    }
+
+    const copySelection = async () => {
+      const sel = term.getSelection()
+      if (!sel) return false
+      try {
+        await navigator.clipboard.writeText(sel)
+        return true
+      } catch {
+        // non-secure context (plain http): fall back to the legacy path
+        const ta = document.createElement('textarea')
+        ta.value = sel
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        let ok = false
+        try {
+          ok = document.execCommand('copy')
+        } catch {
+          ok = false
+        }
+        ta.remove()
+        return ok
+      }
+    }
+
+    // Browsers only expose the clipboard to a paste event in an insecure
+    // context, so read it from there instead of calling the async API.
+    const onPaste = (ev: ClipboardEvent) => {
+      const text = ev.clipboardData?.getData('text')
+      if (!text) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      sendText(text)
+    }
+    el.current.addEventListener('paste', onPaste, true)
+
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true
+      const mod = ev.ctrlKey || ev.metaKey
+      if (mod && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
+        void copySelection()
+        return false
+      }
+      if (mod && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
+        // returning true lets the browser fire the paste event we listen to
+        return true
+      }
+      if (mod && !ev.shiftKey && (ev.key === 'C' || ev.key === 'c') && term.getSelection()) {
+        void copySelection()
+        return false
+      }
+      return true
+    })
+
     const sub = term.onData((d) => {
       // cmd.exe on a pipe only accepts CRLF as Enter; a pty treats CR as NL and
       // CRLF would run an extra empty command.
@@ -131,6 +206,8 @@ export default function TerminalPanel({
     return () => {
       window.clearTimeout(t0)
       window.clearTimeout(t1)
+      el.current?.removeEventListener('paste', onPaste, true)
+      el.current?.removeEventListener('contextmenu', onContextMenu)
       sub.dispose()
       ro.disconnect()
       term.dispose()
@@ -159,6 +236,10 @@ export default function TerminalPanel({
         // prompt once we are definitely listening.
         const isWindows = (os || '').toLowerCase().startsWith('win')
         window.setTimeout(() => {
+          // Asking for a fresh prompt runs an empty command. cmd.exe does not
+          // echo and prints its prompt without a newline, so the second prompt
+          // would land on the same line as the first - break it ourselves.
+          if (isWindows) termRef.current?.write('\r\n')
           queueRef.current += isWindows ? '\r\n' : '\r'
           void pump.current()
         }, 200)
