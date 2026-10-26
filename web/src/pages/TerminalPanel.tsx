@@ -22,6 +22,15 @@ export default function TerminalPanel({
   const fitRef = useRef<FitAddon | null>(null)
   const queueRef = useRef('')
   const sendingRef = useRef(false)
+  // Echo state for the "local echo only when needed" rule:
+  //   on=false  → the shell is expected to echo; we draw nothing ourselves
+  //   on=true   → the shell stayed silent, so the panel echoes the keys
+  const echoRef = useRef<{ on: boolean; awaiting: string; timer: number; lastData: number }>({
+    on: false,
+    awaiting: '',
+    timer: 0,
+    lastData: 0,
+  })
 
   // Input is sent one request at a time.
   //
@@ -82,6 +91,27 @@ export default function TerminalPanel({
     const sub = term.onData((d) => {
       queueRef.current += d === '\r' ? '\r\n' : d
       void pump.current()
+
+      const st = echoRef.current
+      const printable = d.length === 1 && d >= ' ' && d !== '\x7f'
+      if (!printable) return
+      if (st.on) {
+        // this shell does not echo (pipes / echo disabled): draw immediately
+        term.write(d)
+        return
+      }
+      // optimistic: assume the shell echoes. If nothing comes back shortly,
+      // switch to local echo so the operator can still see what they type.
+      st.awaiting += d
+      if (st.timer) window.clearTimeout(st.timer)
+      st.timer = window.setTimeout(() => {
+        st.timer = 0
+        if (st.awaiting && Date.now() - st.lastData > 150) {
+          st.on = true
+          term.write(st.awaiting)
+          st.awaiting = ''
+        }
+      }, 220)
     })
     return () => {
       window.clearTimeout(t0)
@@ -125,6 +155,17 @@ export default function TerminalPanel({
   useWs((e) => {
     if (e.session_id !== id || !termRef.current) return
     if (e.kind === 'shell.data' && e.data) {
+      const st = echoRef.current
+      st.lastData = Date.now()
+      if (st.timer) {
+        window.clearTimeout(st.timer)
+        st.timer = 0
+      }
+      if (st.on && st.awaiting && e.data.includes(st.awaiting)) {
+        // the shell does echo after all (e.g. a pty showed up): stop doubling
+        st.on = false
+      }
+      st.awaiting = ''
       termRef.current.write(e.data)
     }
   })
