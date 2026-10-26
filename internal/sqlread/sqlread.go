@@ -123,6 +123,10 @@ type Table struct {
 	Name    string
 	Columns []string
 	root    int
+	// aliasIdx is the column declared "INTEGER PRIMARY KEY", which sqlite
+	// stores as NULL in the record because it is an alias for the rowid.
+	// Scan fills it from the b-tree key instead of returning NULL.
+	aliasIdx int
 }
 
 // Table locates a table by name through sqlite_master and extracts its column
@@ -138,11 +142,13 @@ func (d *DB) Table(name string) (*Table, error) {
 			if root <= 0 {
 				return true
 			}
+			cols, alias := parseColumns(vals[4].String())
 			found = &Table{
-				db:      d,
-				Name:    vals[1].String(),
-				Columns: parseColumns(vals[4].String()),
-				root:    root,
+				db:       d,
+				Name:     vals[1].String(),
+				Columns:  cols,
+				root:     root,
+				aliasIdx: alias,
 			}
 			return false
 		}
@@ -181,6 +187,9 @@ func (t *Table) Scan(limit int, fn func(row map[string]Value) bool) error {
 			} else {
 				row[name] = Value{Kind: Null}
 			}
+		}
+		if t.aliasIdx >= 0 && t.aliasIdx < len(t.Columns) && row[t.Columns[t.aliasIdx]].Kind == Null {
+			row[t.Columns[t.aliasIdx]] = Value{Kind: Integer, Int: rowid}
 		}
 		n++
 		if limit > 0 && n > limit {
@@ -471,13 +480,14 @@ func svarint(b []byte, off int) (int64, int, error) {
 	return int64(v), n, nil
 }
 
-// parseColumns extracts column names from a CREATE TABLE statement. It is
+// parseColumns extracts column names from a CREATE TABLE statement, plus the
+// index of the column that aliases the rowid ("INTEGER PRIMARY KEY"). It is
 // deliberately forgiving: table constraints and anything that is not a plain
 // "name type" pair are skipped rather than rejected.
-func parseColumns(create string) []string {
+func parseColumns(create string) ([]string, int) {
 	open := strings.IndexByte(create, '(')
 	if open < 0 {
-		return nil
+		return nil, -1
 	}
 	var parts []string
 	depth := 0
@@ -511,6 +521,7 @@ func parseColumns(create string) []string {
 		}
 	}
 	var cols []string
+	alias := -1
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -531,9 +542,23 @@ func parseColumns(create string) []string {
 		if name == "" {
 			continue
 		}
+		if alias < 0 && isRowIDAlias(p, name) {
+			alias = len(cols)
+		}
 		cols = append(cols, name)
 	}
-	return cols
+	return cols, alias
+}
+
+// isRowIDAlias reports whether one column definition declares "INTEGER PRIMARY
+// KEY", the only form sqlite treats as an alias for the rowid.
+func isRowIDAlias(def, name string) bool {
+	rest := strings.TrimSpace(def[len(name):])
+	fields := strings.Fields(strings.ToUpper(rest))
+	if len(fields) < 3 {
+		return false
+	}
+	return fields[0] == "INTEGER" && fields[1] == "PRIMARY" && strings.HasPrefix(fields[2], "KEY")
 }
 
 // columnName pulls the identifier out of one column definition, honouring the

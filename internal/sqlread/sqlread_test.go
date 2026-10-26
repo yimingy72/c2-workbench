@@ -191,7 +191,7 @@ func TestNotSQLiteAndMissingTable(t *testing.T) {
 
 // TestParseColumns keeps the CREATE TABLE parser honest about constraint lines.
 func TestParseColumns(t *testing.T) {
-	got := parseColumns(`CREATE TABLE t(
+	got, alias := parseColumns(`CREATE TABLE t(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         "user name" TEXT,
         CONSTRAINT u UNIQUE(id),
@@ -201,5 +201,49 @@ func TestParseColumns(t *testing.T) {
 	want := []string{"id", "user name", "weird"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v want %v", got, want)
+	}
+	if alias != 0 {
+		t.Fatalf("rowid alias index = %d, want 0", alias)
+	}
+	if _, alias := parseColumns("CREATE TABLE u(a TEXT, b INT, PRIMARY KEY(a))"); alias != -1 {
+		t.Fatalf("table-level PRIMARY KEY must not be treated as a rowid alias, got %d", alias)
+	}
+}
+
+// TestRowIDAliasIsFilled covers "INTEGER PRIMARY KEY": sqlite stores NULL in
+// the record for that column, so readers must take the value from the b-tree
+// key or joins on the id silently break (this broke Firefox bookmarks).
+func TestRowIDAliasIsFilled(t *testing.T) {
+	data := seed(t, `create table p(id integer primary key, name text);
+insert into p values(7,'seven'),(9,'nine');
+create table q(k text, v int); insert into q values('x',1);`)
+	db, err := Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := db.Table("p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	if err := tbl.Scan(0, func(r map[string]Value) bool {
+		ids = append(ids, r["id"].Int)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != 7 || ids[1] != 9 {
+		t.Fatalf("ids = %v, want [7 9]", ids)
+	}
+	// a table without the alias must not invent an id column
+	if q, err := db.Table("q"); err == nil {
+		if err := q.Scan(0, func(r map[string]Value) bool {
+			if _, ok := r["id"]; ok {
+				t.Fatal("table q has no id column")
+			}
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
