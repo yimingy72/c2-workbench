@@ -120,13 +120,26 @@ func TestEnvCollectorFiltersNoise(t *testing.T) {
 	}
 }
 
+// chromeProfileDir asks the implant itself where Chrome lives on this platform,
+// so the fixture lands exactly where the collector looks (macOS and Linux
+// disagree, and hardcoding one path made these tests fail on the other).
+func chromeProfileDir(t *testing.T) (root, profile string) {
+	t.Helper()
+	for _, br := range browserRoots() {
+		if br.name == "Chrome" && !br.firefox {
+			return br.path, filepath.Join(br.path, "Default")
+		}
+	}
+	t.Fatalf("no Chrome root reported by browserRoots()")
+	return "", ""
+}
+
 // TestBrowserCollectorReadsFixtureProfile drives the Chromium path with a real
 // SQLite file created by the sqlite3 CLI, and tolerates the missing keychain by
 // reporting a note instead of dropping the row.
 func TestBrowserCollectorReadsFixtureProfile(t *testing.T) {
-	home := fixtureHome(t)
-	prof := filepath.Join(home, "Library", "Application Support", "Google", "Chrome")
-	dir := filepath.Join(prof, "Default")
+	fixtureHome(t)
+	prof, dir := chromeProfileDir(t)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -190,9 +203,8 @@ func seedChromeStore(t *testing.T, path, sql string) {
 // console shows "配置摘要" from them, and an unwired helper would silently
 // leave that table empty (which is exactly what happened once).
 func TestBrowserInventoryEmitsConfigSummary(t *testing.T) {
-	home := fixtureHome(t)
-	root := filepath.Join(home, "Library", "Application Support", "Google", "Chrome")
-	prof := filepath.Join(root, "Default")
+	fixtureHome(t)
+	root, prof := chromeProfileDir(t)
 	if err := os.MkdirAll(prof, 0o755); err != nil {
 		t.Fatal(err)
 	}
