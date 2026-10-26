@@ -39,9 +39,14 @@ const (
 	RspData        Type = 0x81
 	RspShell       Type = 0x84
 	RspFrame       Type = 0x85
-	RspErr         Type = 0x82
-	RspEnd         Type = 0x83
-	RspOK          Type = 0x90
+	// RspShellEnd closes an interactive shell. It must NOT be RspEnd: the
+	// protocol carries no request ids, so a stray RspEnd gets attributed to
+	// whatever task is in flight (the command after `stop shell` silently
+	// returned empty output).
+	RspShellEnd Type = 0x86
+	RspErr      Type = 0x82
+	RspEnd      Type = 0x83
+	RspOK       Type = 0x90
 )
 
 var XKey = [32]byte{

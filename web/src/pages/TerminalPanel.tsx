@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Button, App } from 'antd'
+import { App } from 'antd'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -20,8 +20,33 @@ export default function TerminalPanel({
   const el = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
-  const typedRef = useRef('')
-  const echoRef = useRef('')
+  const queueRef = useRef('')
+  const sendingRef = useRef(false)
+
+  // Input is sent one request at a time.
+  //
+  // It used to fire one POST per keystroke: concurrent requests have no
+  // ordering guarantee, so "ip a" could reach the shell as "ip", " a", "i" and
+  // the echo came back scrambled ("ipi p aa"). Chaining the sends through a
+  // queue keeps the byte order the user typed.
+  const pump = useRef(async () => {
+    if (sendingRef.current) return
+    sendingRef.current = true
+    try {
+      while (queueRef.current) {
+        const chunk = queueRef.current
+        queueRef.current = ''
+        await api(`/api/sessions/${id}/shell/in`, {
+          method: 'POST',
+          body: JSON.stringify({ data: chunk }),
+        }).catch(() => {
+          /* connection hiccup: the next chunk will retry the path */
+        })
+      }
+    } finally {
+      sendingRef.current = false
+    }
+  })
 
   useEffect(() => {
     if (!el.current) return
@@ -50,27 +75,13 @@ export default function TerminalPanel({
     const ro = new ResizeObserver(doFit)
     ro.observe(el.current)
     if (el.current.parentElement) ro.observe(el.current.parentElement)
+
+    // No local echo: the shell echoes, and drawing every key twice is what made
+    // the line look garbled. Arrow keys / control sequences are forwarded as-is
+    // so line editing keeps working.
     const sub = term.onData((d) => {
-      let send = d
-      if (d === '\x7f' || d === '\b') {
-        if (!typedRef.current.length) return
-        typedRef.current = typedRef.current.slice(0, -1)
-        term.write('\b \b')
-        send = '\b'
-      } else if (d === '\r') {
-        echoRef.current = typedRef.current
-        typedRef.current = ''
-        term.write('\r\n')
-        send = '\r\n'
-      } else if (d.charCodeAt(0) >= 32 || d === '\t') {
-        typedRef.current += d
-        term.write(d)
-      } else if (d.startsWith('\x1b')) {
-        return
-      }
-      void api(`/api/sessions/${id}/shell/in`, { method: 'POST', body: JSON.stringify({ data: send }) }).catch(() => {
-        /* ignore burst */
-      })
+      queueRef.current += d === '\r' ? '\r\n' : d
+      void pump.current()
     })
     return () => {
       window.clearTimeout(t0)
@@ -95,40 +106,28 @@ export default function TerminalPanel({
 
   useEffect(() => {
     if (!online || !id || !visible) return
-    void api(`/api/sessions/${id}/shell`, { method: 'POST', body: JSON.stringify({ action: 'start' }) }).catch((e) => {
-      message.error(e instanceof Error ? e.message : '终端启动失败')
-    })
+    void api(`/api/sessions/${id}/shell`, { method: 'POST', body: JSON.stringify({ action: 'start' }) })
+      .then(() => {
+        // The shell prints its banner and first prompt the moment it starts,
+        // which is usually before the websocket subscription is up, so that
+        // output is lost and the tab looks blank. One newline asks for a fresh
+        // prompt once we are definitely listening.
+        window.setTimeout(() => {
+          queueRef.current += '\r'
+          void pump.current()
+        }, 200)
+      })
+      .catch((e) => {
+        message.error(e instanceof Error ? e.message : '终端启动失败')
+      })
   }, [id, online, visible, message])
 
   useWs((e) => {
     if (e.session_id !== id || !termRef.current) return
     if (e.kind === 'shell.data' && e.data) {
-      let data = e.data
-      const echo = echoRef.current
-      if (echo) {
-        const cuts = [echo + '\r\n', echo + '\n', echo + '\r', echo]
-        for (const c of cuts) {
-          const i = data.indexOf(c)
-          if (i >= 0 && i <= 4) {
-            data = data.slice(0, i) + data.slice(i + c.length)
-            echoRef.current = ''
-            break
-          }
-        }
-      }
-      if (data) termRef.current.write(data)
+      termRef.current.write(e.data)
     }
   })
 
-  return (
-    <>
-      <div className={styles.fsBar}>
-        <span>交互终端</span>
-        <Button size="small" onClick={() => termRef.current?.clear()}>
-          清屏
-        </Button>
-      </div>
-      <div ref={el} className={styles.xterm} />
-    </>
-  )
+  return <div ref={el} className={styles.xterm} />
 }

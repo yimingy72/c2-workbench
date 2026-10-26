@@ -247,3 +247,27 @@ func TestProgressingTaskIsNotCut(t *testing.T) {
 		t.Fatalf("clean finish mishandled: %+v", task)
 	}
 }
+
+// TestShellEndDoesNotFinishTask covers the frame-collision bug: closing the
+// interactive shell used to send a plain RspEnd, which the hub attributed to
+// whatever task was in flight, so the next command came back empty.
+func TestShellEndDoesNotFinishTask(t *testing.T) {
+	h := NewHub(nil)
+	s := h.Attach("L1", "1.2.3.4:9", protocol.Register{}, func(protocol.Type, []byte) error { return nil })
+	tid, err := h.EnqueueExec(s.ID, "echo hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the shell that was just closed reports its own end
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspShellEnd})
+	if task := h.GetTask(tid); task == nil || task.Done {
+		t.Fatalf("shell end finished an unrelated task: %+v", task)
+	}
+	// the command's real output must still land and complete it
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspData, Payload: []byte("hi\n")})
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.RspEnd})
+	task := h.GetTask(tid)
+	if task == nil || !task.Done || string(task.Output) != "hi\n" {
+		t.Fatalf("task lost its output: %+v", task)
+	}
+}

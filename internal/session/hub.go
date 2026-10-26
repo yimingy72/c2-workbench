@@ -627,6 +627,9 @@ func (h *Hub) OnFrame(sessionID string, f protocol.Frame) {
 			t.Seen = h.now()
 		}
 		h.emitLocked(Event{Kind: EventShellData, SessionID: sessionID, Data: decodeOEM(f.Payload)})
+	case protocol.RspShellEnd:
+		// closing an interactive shell is not a task completion
+		h.emitLocked(Event{Kind: EventShellData, SessionID: sessionID, Data: ""})
 	case protocol.RspFrame:
 		b64 := base64.StdEncoding.EncodeToString(f.Payload)
 		t := h.inFlightLocked(s)

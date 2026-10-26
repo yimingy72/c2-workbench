@@ -145,7 +145,7 @@ func session(c net.Conn) int {
 			_ = cmd.Wait()
 		}
 		closeShell()
-		_ = writeFrame(c, protocol.RspEnd, nil)
+		_ = writeFrame(c, protocol.RspShellEnd, nil)
 	}
 	defer closeShell()
 
@@ -227,7 +227,11 @@ func session(c net.Conn) int {
 				closeShell()
 				cmd := shellCmd()
 				hideWindow(cmd)
-				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8", "CHCP=65001")
+				// TERM is what makes `clear`, `top`, `vi` and colour output work:
+				// without it ncurses refuses ("TERM environment variable not set")
+				// and nothing emits the escape sequences the browser terminal needs.
+				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8",
+					"TERM=xterm-256color", "COLORTERM=truecolor", "CHCP=65001")
 				in, e1 := cmd.StdinPipe()
 				out, e2 := cmd.StdoutPipe()
 				cmd.Stderr = cmd.Stdout
@@ -247,7 +251,7 @@ func session(c net.Conn) int {
 				}
 			case protocol.CmdShellOff:
 				closeShell()
-				_ = writeFrame(c, protocol.RspEnd, nil)
+				_ = writeFrame(c, protocol.RspShellEnd, nil)
 			case protocol.CmdQuit:
 				return 2
 			}

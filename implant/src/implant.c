@@ -402,7 +402,7 @@ static int session_loop(SOCKET s) {
                 }
             } else if (type == CMD_SHELL_OFF) {
                 shell_close();
-                send_frame(s, RSP_END, NULL, 0);
+                send_frame(s, RSP_SHELL_END, NULL, 0);
             } else if (type == CMD_QUIT) {
                 shell_close();
                 free(inbuf);

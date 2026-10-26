@@ -31,6 +31,7 @@
 #define RSP_DATA 0x81
 #define RSP_ERR 0x82
 #define RSP_END 0x83
+#define RSP_SHELL_END 0x86
 #define RSP_SHELL 0x84
 #define RSP_FRAME 0x85
 #define RSP_OK 0x90
