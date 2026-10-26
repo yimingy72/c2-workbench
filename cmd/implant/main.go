@@ -98,6 +98,7 @@ func session(c net.Conn) int {
 		put     putState
 		shGen   int
 		shMu    sync.Mutex
+		ptyMode bool
 	)
 	closeShell := func() {
 		shMu.Lock()
@@ -239,6 +240,9 @@ func session(c net.Conn) int {
 				ptyMaster, ptyCleanup, ptyErr := attachPTY(cmd)
 				var in io.WriteCloser
 				var out io.ReadCloser
+				shMu.Lock()
+				ptyMode = ptyErr == nil
+				shMu.Unlock()
 				if ptyErr == nil {
 					if err := cmd.Start(); err != nil {
 						ptyCleanup()
@@ -265,7 +269,16 @@ func session(c net.Conn) int {
 				go pumpShell(out, cmd, gen)
 			case protocol.CmdShellIn:
 				if shIn != nil && len(fr.Payload) > 0 {
-					_, _ = shIn.Write(fr.Payload)
+					data := fr.Payload
+					shMu.Lock()
+					onPTY := ptyMode
+					shMu.Unlock()
+					if !onPTY {
+						// a pipe-backed shell (macOS today) needs a real newline;
+						// a bare CR would just sit in the line buffer
+						data = crToLF(data)
+					}
+					_, _ = shIn.Write(data)
 				}
 			case protocol.CmdShellOff:
 				closeShell()
@@ -315,6 +328,22 @@ func writeFrame(c net.Conn, typ protocol.Type, payload []byte) error {
 // dropped. Anything slower than 120 ms (a WAN path, a busy target) killed the
 // session on the first command. A blocking reader plus a channel keeps the
 // stream intact and still lets the loop tick.
+// crToLF normalises typed input for pipe-backed shells.
+func crToLF(in []byte) []byte {
+	out := make([]byte, 0, len(in)+1)
+	for i := 0; i < len(in); i++ {
+		if in[i] == '\r' {
+			out = append(out, '\n')
+			if i+1 < len(in) && in[i+1] == '\n' {
+				i++
+			}
+			continue
+		}
+		out = append(out, in[i])
+	}
+	return out
+}
+
 func readFrames(c net.Conn) (<-chan protocol.Frame, <-chan error) {
 	frames := make(chan protocol.Frame, 32)
 	errs := make(chan error, 1)

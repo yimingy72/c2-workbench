@@ -394,11 +394,21 @@ static int session_loop(SOCKET s) {
                 last_hb = GetTickCount();
             } else if (type == CMD_SHELL_IN) {
                 if (g_sh_in && inlen > 0) {
+                    /* cmd.exe reads from a pipe: a bare CR is not an Enter, and
+                       CRLF typed as-is would run an extra empty command */
+                    unsigned char obuf[BUF_SZ * 2 + 2];
+                    int n = 0, i;
                     DWORD wr = 0;
-                    if (inlen == 1 && inbuf[0] == '\r')
-                        WriteFile(g_sh_in, "\r\n", 2, &wr, NULL);
-                    else
-                        WriteFile(g_sh_in, inbuf, (DWORD)inlen, &wr, NULL);
+                    for (i = 0; i < inlen && n < (int)sizeof(obuf) - 2; i++) {
+                        if (inbuf[i] == '\r') {
+                            obuf[n++] = '\r';
+                            obuf[n++] = '\n';
+                            if (i + 1 < inlen && inbuf[i + 1] == '\n') i++;
+                        } else {
+                            obuf[n++] = inbuf[i];
+                        }
+                    }
+                    if (n > 0) WriteFile(g_sh_in, obuf, (DWORD)n, &wr, NULL);
                 }
             } else if (type == CMD_SHELL_OFF) {
                 shell_close();

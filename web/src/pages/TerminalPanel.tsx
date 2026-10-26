@@ -11,10 +11,12 @@ export default function TerminalPanel({
   id,
   online,
   visible,
+  os,
 }: {
   id: string
   online: boolean
   visible: boolean
+  os?: string
 }) {
   const { message } = App.useApp()
   const el = useRef<HTMLDivElement>(null)
@@ -89,11 +91,24 @@ export default function TerminalPanel({
     // the line look garbled. Arrow keys / control sequences are forwarded as-is
     // so line editing keeps working.
     const sub = term.onData((d) => {
-      queueRef.current += d === '\r' ? '\r\n' : d
+      // cmd.exe on a pipe only accepts CRLF as Enter; a pty treats CR as NL and
+      // CRLF would run an extra empty command.
+      const isWindows = (os || '').toLowerCase().startsWith('win')
+      queueRef.current += d === '\r' ? (isWindows ? '\r\n' : '\r') : d
       void pump.current()
 
       const st = echoRef.current
-      const printable = d.length === 1 && d >= ' ' && d !== '\x7f'
+      if (d === '\r') {
+        // cmd.exe does not echo and its prompt has no trailing newline, so the
+        // prompts pile up on one line unless we break it ourselves.
+        if (st.on) term.write('\r\n')
+        return
+      }
+      if (d === '\x7f' || d === '\b') {
+        if (st.on) term.write('\b \b')
+        return
+      }
+      const printable = d.length === 1 && d >= ' '
       if (!printable) return
       if (st.on) {
         // this shell does not echo (pipes / echo disabled): draw immediately
@@ -125,7 +140,7 @@ export default function TerminalPanel({
         /* ignore */
       })
     }
-  }, [id])
+  }, [id, os])
 
   useEffect(() => {
     if (visible) {
@@ -142,15 +157,16 @@ export default function TerminalPanel({
         // which is usually before the websocket subscription is up, so that
         // output is lost and the tab looks blank. One newline asks for a fresh
         // prompt once we are definitely listening.
+        const isWindows = (os || '').toLowerCase().startsWith('win')
         window.setTimeout(() => {
-          queueRef.current += '\r'
+          queueRef.current += isWindows ? '\r\n' : '\r'
           void pump.current()
         }, 200)
       })
       .catch((e) => {
         message.error(e instanceof Error ? e.message : '终端启动失败')
       })
-  }, [id, online, visible, message])
+  }, [id, online, visible, message, os])
 
   useWs((e) => {
     if (e.session_id !== id || !termRef.current) return

@@ -717,7 +717,7 @@ export default function Host() {
       <div className={styles.hostMain}>
         <div className={styles.fill} hidden={mod !== 'cmd'}>
           {id && online ? (
-            <TerminalPanel id={id} online={online} visible={mod === 'cmd'} />
+            <TerminalPanel id={id} online={online} visible={mod === 'cmd'} os={info?.os} />
           ) : (
             <div className={styles.hint}>主机离线</div>
           )}
