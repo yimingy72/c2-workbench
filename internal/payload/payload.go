@@ -108,17 +108,26 @@ func Status() Meta {
 		label = "未找到 Windows 交叉编译器"
 	}
 	_, goErr := goBin()
-	goLabel := "go"
-	if goErr != nil {
-		goLabel = "未找到 Go 工具链"
-	}
 	stubLabel := "内置模板（无需编译器）"
+	// The label must describe what Build would actually do: compile when the
+	// toolchain is there, otherwise patch the embedded stub.
+	goCompile := "go 现场编译（无工具链时回退内置模板）"
+	if goErr != nil {
+		goCompile = stubLabel
+	}
+	cCompile := label
+	if err != nil {
+		cCompile = stubLabel
+	}
+	goTarget := func(id, name string) TargetInfo {
+		return TargetInfo{ID: id, Label: name, Ready: hasTemplate(id) || goErr == nil, Compiler: goCompile}
+	}
 	targets := []TargetInfo{
-		{ID: "windows-x64", Label: "Windows x64", Ready: len(templates.WindowsX64) > 0 || err == nil, Compiler: stubOr(len(templates.WindowsX64) > 0, stubLabel, label)},
-		{ID: "linux-amd64", Label: "Linux x64", Ready: len(templates.LinuxAmd64) > 0 || goErr == nil, Compiler: stubOr(len(templates.LinuxAmd64) > 0, stubLabel, goLabel)},
-		{ID: "linux-arm64", Label: "Linux ARM64", Ready: len(templates.LinuxArm64) > 0 || goErr == nil, Compiler: stubOr(len(templates.LinuxArm64) > 0, stubLabel, goLabel)},
-		{ID: "darwin-arm64", Label: "macOS Apple Silicon", Ready: len(templates.DarwinArm64) > 0 || goErr == nil, Compiler: stubOr(len(templates.DarwinArm64) > 0, stubLabel, goLabel)},
-		{ID: "darwin-amd64", Label: "macOS Intel", Ready: len(templates.DarwinAmd64) > 0 || goErr == nil, Compiler: stubOr(len(templates.DarwinAmd64) > 0, stubLabel, goLabel)},
+		{ID: "windows-x64", Label: "Windows x64", Ready: len(templates.WindowsX64) > 0 || err == nil, Compiler: cCompile},
+		goTarget("linux-amd64", "Linux x64"),
+		goTarget("linux-arm64", "Linux ARM64"),
+		goTarget("darwin-arm64", "macOS Apple Silicon"),
+		goTarget("darwin-amd64", "macOS Intel"),
 	}
 	ready := false
 	for _, t := range targets {
@@ -165,6 +174,11 @@ func goLanguageHint(compiled bool) string {
 		return "本机 Go/Garble 现场编译，支持 Windows/Linux/macOS"
 	}
 	return "内嵌预编译模板打补丁（无需工具链），支持 Windows/Linux/macOS"
+}
+
+// hasTemplate reports whether an embedded stub exists for the target.
+func hasTemplate(target string) bool {
+	return len(templates.Lookup(target)) > 0
 }
 
 func stubOr(ok bool, a, b string) string {

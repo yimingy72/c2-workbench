@@ -169,5 +169,25 @@ func TestStatusWithoutToolchain(t *testing.T) {
 		if !tgt.Ready {
 			t.Fatalf("target %s not ready: %+v", tgt.ID, tgt)
 		}
+		if !strings.Contains(tgt.Compiler, "内置模板") {
+			t.Fatalf("target %s should advertise the stub when no toolchain: %+v", tgt.ID, tgt)
+		}
+	}
+}
+
+// TestStatusCompilerLabelsMatchBuildPath keeps the console honest after a
+// toolchain is installed: the go targets must stop claiming "内置模板".
+func TestStatusCompilerLabelsMatchBuildPath(t *testing.T) {
+	if _, err := goBin(); err != nil {
+		t.Skip("no toolchain in this environment")
+	}
+	m := Status()
+	for _, tgt := range m.Targets {
+		if tgt.ID == "windows-x64" {
+			continue // the C path depends on mingw, not on go
+		}
+		if !strings.Contains(tgt.Compiler, "现场编译") {
+			t.Fatalf("target %s should advertise compiling: %q", tgt.ID, tgt.Compiler)
+		}
 	}
 }
