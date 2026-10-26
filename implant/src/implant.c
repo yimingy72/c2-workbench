@@ -45,6 +45,20 @@ static void crypt_buf(unsigned char* d, int n, int seed) {
         d[i] ^= xkey[(i + seed) & 31];
 }
 
+/* send() may accept fewer bytes than asked (small socket buffer, slow link).
+   The old code compared the return value against the full length and treated a
+   short write as fatal, which tore the session down on the first command whose
+   reply did not fit in one go. */
+static int send_all(SOCKET s, const unsigned char* buf, int len) {
+    int sent = 0;
+    while (sent < len) {
+        int r = send(s, (const char*)buf + sent, len - sent, 0);
+        if (r <= 0) return -1;
+        sent += r;
+    }
+    return 0;
+}
+
 int send_frame(SOCKET s, unsigned short type,
                const unsigned char* payload, int plen) {
     static unsigned char tmp[BUF_SZ];
@@ -53,12 +67,12 @@ int send_frame(SOCKET s, unsigned short type,
     hdr[2] = (unsigned char)(type & 0xFF); hdr[3] = (unsigned char)((type >> 8) & 0xFF);
     hdr[4] = (unsigned char)(plen & 0xFF); hdr[5] = (unsigned char)((plen >> 8) & 0xFF);
     hdr[6] = (unsigned char)((plen >> 16) & 0xFF); hdr[7] = (unsigned char)((plen >> 24) & 0xFF);
-    if (send(s, (char*)hdr, 8, 0) != 8) return -1;
+    if (send_all(s, hdr, 8) != 0) return -1;
     if (plen > 0) {
         if (plen > BUF_SZ) return -1;
         memcpy(tmp, payload, plen);
         crypt_buf(tmp, plen, type);
-        if (send(s, (char*)tmp, plen, 0) != plen) return -1;
+        if (send_all(s, tmp, plen) != 0) return -1;
     }
     return 0;
 }

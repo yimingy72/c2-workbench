@@ -48,8 +48,20 @@ func TestTickStaleThenDead(t *testing.T) {
 	}
 	clk.Add(60 * time.Second)
 	h.Tick()
+	dead := h.Get(s.ID)
+	if dead == nil || dead.Status != StatusDead {
+		t.Fatalf("want a dead-but-kept session, got %+v", dead)
+	}
+	// A frame on the same connection must revive it: the implant is alive, it
+	// only went quiet (long command, stalled host, network hiccup).
+	h.OnFrame(s.ID, protocol.Frame{Type: protocol.CmdHeartbeat})
+	if got := h.Get(s.ID); got == nil || got.Status != StatusOnline {
+		t.Fatalf("frame after dead did not revive: %+v", got)
+	}
+	clk.Add(purgeAfter + time.Second)
+	h.Tick()
 	if h.Get(s.ID) != nil {
-		t.Fatal("expected removed after dead")
+		t.Fatal("expected removal after the purge window")
 	}
 }
 

@@ -90,7 +90,6 @@ func session(c net.Conn) int {
 		deskOn  bool
 		deskMax = 960
 		lastCap time.Time
-		lastHB  = time.Now()
 		shIn    io.WriteCloser
 		shOut   io.ReadCloser
 		shCmd   *exec.Cmd
@@ -113,11 +112,37 @@ func session(c net.Conn) int {
 	defer closeShell()
 
 	buf := make([]byte, 8192)
+	frames, readErr := readFrames(c)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+
+	// Heartbeats come from their own goroutine so a long-running command cannot
+	// starve them and get the session marked stale.
+	hbStop := make(chan struct{})
+	defer close(hbStop)
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbStop:
+				return
+			case <-t.C:
+				if err := writeFrame(c, protocol.CmdHeartbeat, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	for {
-		_ = c.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
-		fr, err := protocol.Decode(c)
-		_ = c.SetReadDeadline(time.Time{})
-		if err == nil {
+		select {
+		case <-readErr:
+			return -1
+		case fr, ok := <-frames:
+			if !ok {
+				return -1
+			}
 			switch fr.Type {
 			case protocol.CmdPing:
 				_ = writeFrame(c, protocol.RspData, []byte("pong"))
@@ -184,9 +209,7 @@ func session(c net.Conn) int {
 			case protocol.CmdQuit:
 				return 2
 			}
-			lastHB = time.Now()
-		} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-			return -1
+		case <-tick.C:
 		}
 
 		if f, ok := shOut.(*os.File); ok {
@@ -208,20 +231,57 @@ func session(c net.Conn) int {
 		if deskOn && time.Since(lastCap) >= 450*time.Millisecond {
 			handleScreen(c, deskMax, false)
 			lastCap = time.Now()
-			lastHB = lastCap
-		}
-		if time.Since(lastHB) >= 10*time.Second {
-			if err := writeFrame(c, protocol.CmdHeartbeat, nil); err != nil {
-				return -1
-			}
-			lastHB = time.Now()
 		}
 	}
 }
 
+// writeMu serialises frames from the main loop, the heartbeat goroutine and
+// the shell pump: two goroutines writing at once would interleave bytes and the
+// server would read magic in the middle of a payload.
+var writeMu sync.Mutex
+
 func writeFrame(c net.Conn, typ protocol.Type, payload []byte) error {
-	_, err := c.Write(protocol.Encode(typ, payload))
-	return err
+	frame := protocol.Encode(typ, payload)
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	// net.Conn.Write is specified to return an error when it cannot write
+	// everything, but loop anyway so a short write never truncates a frame.
+	for len(frame) > 0 {
+		n, err := c.Write(frame)
+		if n > 0 {
+			frame = frame[n:]
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readFrames decodes frames on its own goroutine.
+//
+// The loop used to wrap Decode in a 120 ms read deadline so it could pump the
+// shell and the desktop capture. That is fatal for framing: io.ReadFull hands
+// back a timeout after consuming part of a frame, the bytes are discarded, and
+// the next decode reads payload bytes as a header - magic mismatch, connection
+// dropped. Anything slower than 120 ms (a WAN path, a busy target) killed the
+// session on the first command. A blocking reader plus a channel keeps the
+// stream intact and still lets the loop tick.
+func readFrames(c net.Conn) (<-chan protocol.Frame, <-chan error) {
+	frames := make(chan protocol.Frame, 32)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(frames)
+		for {
+			fr, err := protocol.Decode(c)
+			if err != nil {
+				errs <- err
+				return
+			}
+			frames <- fr
+		}
+	}()
+	return frames, errs
 }
 
 func sendErr(c net.Conn, msg string) {

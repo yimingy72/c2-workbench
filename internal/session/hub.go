@@ -40,6 +40,9 @@ const (
 )
 
 const (
+	// purgeAfter drops a session that has been silent this long; anything
+	// shorter is only marked dead so the same connection can recover.
+	purgeAfter   = 10 * time.Minute
 	maxTaskBytes = 16 << 20
 	// browsing stores (History) routinely exceed the task cap
 	maxGetBytes = 128 << 20
@@ -221,9 +224,15 @@ func (h *Hub) Tick() {
 			deadAfter = 90 * time.Second
 		}
 		switch {
-		case age >= deadAfter:
-			s.Status = StatusDead
+		case age >= purgeAfter:
+			// The socket never closed and never spoke again: forget it.
 			delete(h.sessions, id)
+			h.emitLocked(Event{Kind: EventSessionDown, SessionID: id})
+		case age >= deadAfter && s.Status != StatusDead:
+			// Mark, do not delete: the TCP connection may still be alive, and a
+			// deleted session can never be revived by the frames that follow
+			// (a long command, a stalled host, a temporary network hiccup).
+			s.Status = StatusDead
 			h.emitLocked(Event{Kind: EventSessionDown, SessionID: id})
 		case age >= timeout && s.Status == StatusOnline:
 			s.Status = StatusStale
